@@ -268,6 +268,7 @@ if(APPLE)
     set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.alexbatalov.fallout2-ce")
     set(MACOSX_BUNDLE_BUNDLE_NAME "${EXECUTABLE_NAME}")
     set(MACOSX_BUNDLE_DISPLAY_NAME "Fallout 2")
+    set(MACOSX_BUNDLE_ICON_FILE "fallout2")
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0")
 endif()
 
