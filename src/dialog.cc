@@ -1,14 +1,16 @@
 #include "dialog.h"
 
-#include "core.h"
+#include <string.h>
+
 #include "memory_manager.h"
+#include "mouse.h"
 #include "movie.h"
 #include "platform_compat.h"
+#include "svga.h"
 #include "text_font.h"
-#include "widget.h"
 #include "window_manager.h"
 
-#include <string.h>
+namespace fallout {
 
 // 0x501623
 const float flt_501623 = 31.0;
@@ -76,7 +78,7 @@ int dword_56DB6C;
 int dword_56DB70;
 
 // 0x56DB74
-int _rand2plus;
+char* off_56DB74;
 
 // 0x56DB7C
 int dword_56DB7C;
@@ -91,7 +93,7 @@ int dword_56DB84;
 int dword_56DB88;
 
 // 0x56DB8C
-int dword_56DB8C;
+char* off_56DB8C;
 
 // 0x56DB90
 int _replyPlaying;
@@ -127,16 +129,16 @@ int dword_56DBB8;
 int dword_56DBBC;
 
 // 0x56DBC0
-void* off_56DBC0;
+char* off_56DBC0;
 
 // 0x56DBC4
-void* off_56DBC4;
+char* off_56DBC4;
 
 // 0x56DBC8
-void* off_56DBC8;
+char* off_56DBC8;
 
 // 0x56DBCC
-void* off_56DBCC;
+char* off_56DBCC;
 
 // 0x56DBD0
 char* gDialogReplyTitle;
@@ -151,16 +153,16 @@ int dword_56DBD8;
 int dword_56DBDC;
 
 // 0x56DBE0
-void* off_56DBE0;
+char* off_56DBE0;
 
 // 0x56DBE4
-void* off_56DBE4;
+char* off_56DBE4;
 
 // 0x56DBE8
-void* off_56DBE8;
+char* off_56DBE8;
 
 // 0x56DBEC
-void* off_56DBEC;
+char* off_56DBEC;
 
 // 0x42F434
 STRUCT_56DAE0_FIELD_4* _getReply()
@@ -191,7 +193,7 @@ void _replyAddOption(const char* a1, const char* a2, int a3)
 
     v18 = _getReply();
     v17 = v18->field_14 - 1;
-    v18->field_C[v17].field_8 = 2;
+    v18->field_C[v17].kind = 2;
 
     if (a1 != NULL) {
         v14 = (char*)internal_malloc_safe(strlen(a1) + 1, __FILE__, __LINE__); // "..\\int\\DIALOG.C", 805
@@ -204,18 +206,18 @@ void _replyAddOption(const char* a1, const char* a2, int a3)
     if (a2 != NULL) {
         v15 = (char*)internal_malloc_safe(strlen(a2) + 1, __FILE__, __LINE__); // "..\\int\\DIALOG.C", 810
         strcpy(v15, a2);
-        v18->field_C[v17].field_4 = v15;
+        v18->field_C[v17].string = v15;
     } else {
-        v18->field_C[v17].field_4 = NULL;
+        v18->field_C[v17].string = NULL;
     }
 
-    v18->field_C[v17].field_18 = widgetGetFont();
+    v18->field_C[v17].field_18 = windowGetFont();
     v18->field_C[v17].field_1A = word_56DB60;
     v18->field_C[v17].field_14 = a3;
 }
 
 // 0x42F624
-void _replyAddOptionProc(const char* a1, const char* a2, int a3)
+void _replyAddOptionProc(const char* a1, int a2, int a3)
 {
     STRUCT_56DAE0_FIELD_4* v5;
     int v13;
@@ -224,7 +226,7 @@ void _replyAddOptionProc(const char* a1, const char* a2, int a3)
     v5 = _getReply();
     v13 = v5->field_14 - 1;
 
-    v5->field_C[v13].field_8 = 1;
+    v5->field_C[v13].kind = 1;
 
     if (a1 != NULL) {
         v11 = (char*)internal_malloc_safe(strlen(a1) + 1, __FILE__, __LINE__); // "..\\int\\DIALOG.C", 830
@@ -234,9 +236,9 @@ void _replyAddOptionProc(const char* a1, const char* a2, int a3)
         v5->field_C[v13].field_0 = NULL;
     }
 
-    v5->field_C[v13].field_4 = (char*)a2;
+    v5->field_C[v13].proc = a2;
 
-    v5->field_C[v13].field_18 = widgetGetFont();
+    v5->field_C[v13].field_18 = windowGetFont();
     v5->field_C[v13].field_1A = word_56DB60;
     v5->field_C[v13].field_14 = a3;
 }
@@ -248,9 +250,9 @@ void _optionFree(STRUCT_56DAE0_FIELD_4_FIELD_C* a1)
         internal_free_safe(a1->field_0, __FILE__, __LINE__); // "..\\int\\DIALOG.C", 844
     }
 
-    if (a1->field_8 == 2) {
-        if (a1->field_4 != NULL) {
-            internal_free_safe(a1->field_4, __FILE__, __LINE__); // "..\\int\\DIALOG.C", 846
+    if (a1->kind == 2) {
+        if (a1->string != NULL) {
+            internal_free_safe(a1->string, __FILE__, __LINE__); // "..\\int\\DIALOG.C", 846
         }
     }
 }
@@ -388,8 +390,8 @@ void _drawStr(int win, char* str, int font, int width, int height, int left, int
     int old_font;
     Rect rect;
 
-    old_font = widgetGetFont();
-    widgetSetFont(font);
+    old_font = windowGetFont();
+    windowSetFont(font);
 
     _printStr(win, str, width, height, left, top, a8, a9, a10);
 
@@ -398,7 +400,7 @@ void _drawStr(int win, char* str, int font, int width, int height, int left, int
     rect.right = width + left;
     rect.bottom = height + top;
     windowRefreshRect(win, &rect);
-    widgetSetFont(old_font);
+    windowSetFont(old_font);
 }
 
 // 0x430D40
@@ -503,7 +505,7 @@ int _dialogOption(const char* a1, const char* a2)
 }
 
 // 0x430F38
-int _dialogOptionProc(const char* a1, const char* a2)
+int _dialogOptionProc(const char* a1, int a2)
 {
     if (_dialog[_tods].field_C == -1) {
         return 1;
@@ -512,6 +514,20 @@ int _dialogOptionProc(const char* a1, const char* a2)
     _replyAddOptionProc(a1, a2, 0);
 
     return 0;
+}
+
+// 0x430FD4
+int sub_430FD4(const char* a1, const char* a2, int timeout)
+{
+    // TODO: Incomplete.
+    return -1;
+}
+
+// 0x431088
+int sub_431088(int a1)
+{
+    // TODO: Incomplete.
+    return -1;
 }
 
 // 0x431184
@@ -533,24 +549,24 @@ int _dialogQuit()
 }
 
 // 0x4311B8
-int dialogSetOptionWindow(int a1, int a2, int a3, int a4, int a5)
+int dialogSetOptionWindow(int a1, int a2, int a3, int a4, char* a5)
 {
     dword_56DB6C = a1;
     dword_56DB70 = a2;
     dword_56DB64 = a3;
     dword_56DB68 = a4;
-    _rand2plus = a5;
+    off_56DB74 = a5;
     return 0;
 }
 
 // 0x4311E0
-int dialogSetReplyWindow(int a1, int a2, int a3, int a4, int a5)
+int dialogSetReplyWindow(int a1, int a2, int a3, int a4, char* a5)
 {
     dword_56DB84 = a1;
     dword_56DB88 = a2;
     dword_56DB7C = a3;
     dword_56DB80 = a4;
-    dword_56DB8C = a5;
+    off_56DB8C = a5;
 
     return 0;
 }
@@ -565,7 +581,7 @@ int dialogSetBorder(int a1, int a2)
 }
 
 // 0x431218
-int _dialogSetScrollUp(int a1, int a2, void* a3, void* a4, void* a5, void* a6, int a7)
+int _dialogSetScrollUp(int a1, int a2, char* a3, char* a4, char* a5, char* a6, int a7)
 {
     _upButton = a1;
     dword_56DBD8 = a2;
@@ -596,7 +612,7 @@ int _dialogSetScrollUp(int a1, int a2, void* a3, void* a4, void* a5, void* a6, i
 }
 
 // 0x4312C0
-int _dialogSetScrollDown(int a1, int a2, void* a3, void* a4, void* a5, void* a6, int a7)
+int _dialogSetScrollDown(int a1, int a2, char* a3, char* a4, char* a5, char* a6, int a7)
 {
     _downButton = a1;
     dword_56DBB8 = a2;
@@ -666,6 +682,11 @@ int _dialogSetOptionFlags(int flags)
     return 1;
 }
 
+// 0x431430
+void dialogInit()
+{
+}
+
 // 0x431434
 void _dialogClose()
 {
@@ -732,3 +753,5 @@ int _dialogGetMediaFlag()
 {
     return _mediaFlag;
 }
+
+} // namespace fallout

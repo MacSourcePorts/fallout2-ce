@@ -1,12 +1,16 @@
 #include "game_sound.h"
 
+#include <stdio.h>
+#include <string.h>
+
 #include "animation.h"
 #include "art.h"
 #include "audio.h"
+#include "audio_file.h"
 #include "combat.h"
-#include "core.h"
 #include "debug.h"
 #include "game_config.h"
+#include "input.h"
 #include "item.h"
 #include "map.h"
 #include "memory.h"
@@ -16,13 +20,14 @@
 #include "proto.h"
 #include "queue.h"
 #include "random.h"
+#include "settings.h"
 #include "sound_effects_cache.h"
 #include "stat.h"
+#include "svga.h"
 #include "window_manager.h"
-#include "world_map.h"
+#include "worldmap.h"
 
-#include <stdio.h>
-#include <string.h>
+namespace fallout {
 
 typedef enum SoundEffectActionType {
     SOUND_EFFECT_ACTION_TYPE_ACTIVE,
@@ -152,7 +157,7 @@ static int _gsound_speech_volume_get_set(int volume);
 static void speechPause();
 static void speechResume();
 static void _gsound_bkg_proc();
-static int gameSoundFileOpen(const char* fname, int access, ...);
+static int gameSoundFileOpen(const char* fname, int access);
 static long _gsound_write_();
 static long gameSoundFileTellNotImplemented(int handle);
 static int gameSoundFileWrite(int handle, const void* buf, unsigned int size);
@@ -187,13 +192,11 @@ int gameSoundInit()
         return -1;
     }
 
-    bool initialize;
-    configGetBool(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_INITIALIZE_KEY, &initialize);
-    if (!initialize) {
+    if (!settings.sound.initialize) {
         return 0;
     }
 
-    configGetBool(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_DEBUG_KEY, &gGameSoundDebugEnabled);
+    gGameSoundDebugEnabled = settings.sound.debug;
 
     if (gGameSoundDebugEnabled) {
         debugPrint("Initializing sound system...");
@@ -237,8 +240,7 @@ int gameSoundInit()
     audioFileInit(gameSoundIsCompressed);
     audioInit(gameSoundIsCompressed);
 
-    int cacheSize;
-    configGetInt(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_CACHE_SIZE_KEY, &cacheSize);
+    int cacheSize = settings.sound.cache_size;
     if (cacheSize >= 0x40000) {
         debugPrint("\n!!! Config file needs adustment.  Please remove the ");
         debugPrint("cache_size line and run fallout again.  This will reset ");
@@ -263,14 +265,11 @@ int gameSoundInit()
     gGameSoundInitialized = true;
 
     // SOUNDS
-    bool sounds = 0;
-    configGetBool(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_SOUNDS_KEY, &sounds);
-
     if (gGameSoundDebugEnabled) {
         debugPrint("Sounds are ");
     }
 
-    if (sounds) {
+    if (settings.sound.sounds) {
         // NOTE: Uninline.
         soundEffectsEnable();
     } else {
@@ -284,14 +283,11 @@ int gameSoundInit()
     }
 
     // MUSIC
-    bool music = 0;
-    configGetBool(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_MUSIC_KEY, &music);
-
     if (gGameSoundDebugEnabled) {
         debugPrint("Music is ");
     }
 
-    if (music) {
+    if (settings.sound.music) {
         // NOTE: Uninline.
         backgroundSoundEnable();
     } else {
@@ -305,14 +301,11 @@ int gameSoundInit()
     }
 
     // SPEEECH
-    bool speech = 0;
-    configGetBool(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_SPEECH_KEY, &speech);
-
     if (gGameSoundDebugEnabled) {
         debugPrint("Speech is ");
     }
 
-    if (speech) {
+    if (settings.sound.speech) {
         // NOTE: Uninline.
         speechEnable();
     } else {
@@ -325,16 +318,16 @@ int gameSoundInit()
         debugPrint("on.\n");
     }
 
-    configGetInt(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_MASTER_VOLUME_KEY, &gMasterVolume);
+    gMasterVolume = settings.sound.master_volume;
     gameSoundSetMasterVolume(gMasterVolume);
 
-    configGetInt(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_MUSIC_VOLUME_KEY, &gMusicVolume);
+    gMusicVolume = settings.sound.music_volume;
     backgroundSoundSetVolume(gMusicVolume);
 
-    configGetInt(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_SNDFX_VOLUME_KEY, &gSoundEffectsVolume);
+    gSoundEffectsVolume = settings.sound.sndfx_volume;
     soundEffectsSetVolume(gSoundEffectsVolume);
 
-    configGetInt(&gGameConfig, GAME_CONFIG_SOUND_KEY, GAME_CONFIG_SPEECH_VOLUME_KEY, &gSpeechVolume);
+    gSpeechVolume = settings.sound.speech_volume;
     speechSetVolume(gSpeechVolume);
 
     _gsound_background_fade = 0;
@@ -905,7 +898,7 @@ int speechLoad(const char* fname, int a2, int a3, int a4)
         return -1;
     }
 
-    if (soundSetFileIO(gSpeechSound, &audioOpen, &audioClose, &audioRead, NULL, &audioSeek, &gameSoundFileTellNotImplemented, &audioGetSize)) {
+    if (soundSetFileIO(gSpeechSound, audioOpen, audioClose, audioRead, NULL, audioSeek, gameSoundFileTellNotImplemented, audioGetSize)) {
         if (gGameSoundDebugEnabled) {
             debugPrint("failed because file IO could not be set for compression.\n");
         }
@@ -1107,7 +1100,7 @@ Sound* soundEffectLoad(const char* name, Object* object)
     ++_gsound_active_effect_counter;
 
     char path[COMPAT_MAX_PATH];
-    sprintf(path, "%s%s%s", _sound_sfx_path, name, ".ACM");
+    snprintf(path, sizeof(path), "%s%s%s", _sound_sfx_path, name, ".ACM");
 
     if (soundLoad(sound, path) == 0) {
         if (gGameSoundDebugEnabled) {
@@ -1118,7 +1111,7 @@ Sound* soundEffectLoad(const char* name, Object* object)
     }
 
     if (object != NULL) {
-        if ((object->fid & 0xF000000) >> 24 == OBJ_TYPE_CRITTER && (name[0] == 'H' || name[0] == 'N')) {
+        if (FID_TYPE(object->fid) == OBJ_TYPE_CRITTER && (name[0] == 'H' || name[0] == 'N')) {
             char v9 = name[1];
             if (v9 == 'A' || v9 == 'F' || v9 == 'M') {
                 if (v9 == 'A') {
@@ -1130,7 +1123,7 @@ Sound* soundEffectLoad(const char* name, Object* object)
                 }
             }
 
-            sprintf(path, "%sH%cXXXX%s%s", _sound_sfx_path, v9, name + 6, ".ACM");
+            snprintf(path, sizeof(path), "%sH%cXXXX%s%s", _sound_sfx_path, v9, name + 6, ".ACM");
 
             if (gGameSoundDebugEnabled) {
                 debugPrint("tyring %s ", path + strlen(_sound_sfx_path));
@@ -1145,7 +1138,7 @@ Sound* soundEffectLoad(const char* name, Object* object)
             }
 
             if (v9 == 'F') {
-                sprintf(path, "%sHMXXXX%s%s", _sound_sfx_path, name + 6, ".ACM");
+                snprintf(path, sizeof(path), "%sHMXXXX%s%s", _sound_sfx_path, name + 6, ".ACM");
 
                 if (gGameSoundDebugEnabled) {
                     debugPrint("tyring %s ", path + strlen(_sound_sfx_path));
@@ -1163,7 +1156,7 @@ Sound* soundEffectLoad(const char* name, Object* object)
     }
 
     if (strncmp(name, "MALIEU", 6) == 0 || strncmp(name, "MAMTN2", 6) == 0) {
-        sprintf(path, "%sMAMTNT%s%s", _sound_sfx_path, name + 6, ".ACM");
+        snprintf(path, sizeof(path), "%sMAMTNT%s%s", _sound_sfx_path, name + 6, ".ACM");
 
         if (gGameSoundDebugEnabled) {
             debugPrint("tyring %s ", path + strlen(_sound_sfx_path));
@@ -1230,7 +1223,7 @@ void soundEffectDelete(Sound* sound)
 }
 
 // 0x4514F0
-int _gsnd_anim_sound(Sound* sound)
+int _gsnd_anim_sound(Sound* sound, void* a2)
 {
     if (!gGameSoundInitialized) {
         return 0;
@@ -1287,7 +1280,7 @@ int _gsound_compute_relative_volume(Object* obj)
     v3 = 0x7FFF;
 
     if (obj) {
-        type = (obj->fid & 0xF000000) >> 24;
+        type = FID_TYPE(obj->fid);
         if (type == 0 || type == 1 || type == 2) {
             v7 = objectGetOwner(obj);
             if (!v7) {
@@ -1325,7 +1318,7 @@ char* sfxBuildCharName(Object* a1, int anim, int extra)
     char v8;
     char v9;
 
-    if (artCopyFileName((a1->fid & 0xF000000) >> 24, a1->fid & 0xFFF, v7) == -1) {
+    if (artCopyFileName(FID_TYPE(a1->fid), a1->fid & 0xFFF, v7) == -1) {
         return NULL;
     }
 
@@ -1350,7 +1343,7 @@ char* sfxBuildCharName(Object* a1, int anim, int extra)
         v8 = 'Z';
     }
 
-    sprintf(_sfx_file_name, "%s%c%c", v7, v8, v9);
+    snprintf(_sfx_file_name, sizeof(_sfx_file_name), "%s%c%c", v7, v8, v9);
     compat_strupr(_sfx_file_name);
     return _sfx_file_name;
 }
@@ -1359,7 +1352,7 @@ char* sfxBuildCharName(Object* a1, int anim, int extra)
 // 0x4516F0
 char* gameSoundBuildAmbientSoundEffectName(const char* a1)
 {
-    sprintf(_sfx_file_name, "A%6s%1d", a1, 1);
+    snprintf(_sfx_file_name, sizeof(_sfx_file_name), "A%6s%1d", a1, 1);
     compat_strupr(_sfx_file_name);
     return _sfx_file_name;
 }
@@ -1368,7 +1361,7 @@ char* gameSoundBuildAmbientSoundEffectName(const char* a1)
 // 0x451718
 char* gameSoundBuildInterfaceName(const char* a1)
 {
-    sprintf(_sfx_file_name, "N%6s%1d", a1, 1);
+    snprintf(_sfx_file_name, sizeof(_sfx_file_name), "N%6s%1d", a1, 1);
     compat_strupr(_sfx_file_name);
     return _sfx_file_name;
 }
@@ -1400,11 +1393,12 @@ char* sfxBuildWeaponName(int effectType, Object* weapon, int hitMode, Object* ta
     }
 
     int damageType = weaponGetDamageType(NULL, weapon);
-    // TODO: Check damageType conditions.
-    if (effectTypeCode != 'H' || target == NULL || damageType == DAMAGE_TYPE_EXPLOSION || damageType == DAMAGE_TYPE_PLASMA || damageType == DAMAGE_TYPE_EMP) {
+
+    // SFALL
+    if (effectTypeCode != 'H' || target == NULL || damageType == explosionGetDamageType() || damageType == DAMAGE_TYPE_PLASMA || damageType == DAMAGE_TYPE_EMP) {
         materialCode = 'X';
     } else {
-        const int type = (target->fid & 0xF000000) >> 24;
+        const int type = FID_TYPE(target->fid);
         int material;
         switch (type) {
         case OBJ_TYPE_ITEM:
@@ -1444,7 +1438,7 @@ char* sfxBuildWeaponName(int effectType, Object* weapon, int hitMode, Object* ta
         }
     }
 
-    sprintf(_sfx_file_name, "W%c%c%1d%cXX%1d", effectTypeCode, weaponSoundCode, v6, materialCode, 1);
+    snprintf(_sfx_file_name, sizeof(_sfx_file_name), "W%c%c%1d%cXX%1d", effectTypeCode, weaponSoundCode, v6, materialCode, 1);
     compat_strupr(_sfx_file_name);
     return _sfx_file_name;
 }
@@ -1456,7 +1450,7 @@ char* sfxBuildSceneryName(int actionType, int action, const char* name)
     char actionTypeCode = actionType == SOUND_EFFECT_ACTION_TYPE_PASSIVE ? 'P' : 'A';
     char actionCode = _snd_lookup_scenery_action[action];
 
-    sprintf(_sfx_file_name, "S%c%c%4s%1d", actionTypeCode, actionCode, name, 1);
+    snprintf(_sfx_file_name, sizeof(_sfx_file_name), "S%c%c%4s%1d", actionTypeCode, actionCode, name, 1);
     compat_strupr(_sfx_file_name);
 
     return _sfx_file_name;
@@ -1466,7 +1460,7 @@ char* sfxBuildSceneryName(int actionType, int action, const char* name)
 // 0x4518D
 char* sfxBuildOpenName(Object* object, int action)
 {
-    if ((object->fid & 0xF000000) >> 24 == OBJ_TYPE_SCENERY) {
+    if (FID_TYPE(object->fid) == OBJ_TYPE_SCENERY) {
         char scenerySoundId;
         Proto* proto;
         if (protoGetProto(object->pid, &proto) != -1) {
@@ -1474,11 +1468,11 @@ char* sfxBuildOpenName(Object* object, int action)
         } else {
             scenerySoundId = 'A';
         }
-        sprintf(_sfx_file_name, "S%cDOORS%c", _snd_lookup_scenery_action[action], scenerySoundId);
+        snprintf(_sfx_file_name, sizeof(_sfx_file_name), "S%cDOORS%c", _snd_lookup_scenery_action[action], scenerySoundId);
     } else {
         Proto* proto;
         protoGetProto(object->pid, &proto);
-        sprintf(_sfx_file_name, "I%cCNTNR%c", _snd_lookup_scenery_action[action], proto->item.field_80);
+        snprintf(_sfx_file_name, sizeof(_sfx_file_name), "I%cCNTNR%c", _snd_lookup_scenery_action[action], proto->item.field_80);
     }
     compat_strupr(_sfx_file_name);
     return _sfx_file_name;
@@ -1554,7 +1548,7 @@ void _gsound_bkg_proc()
 }
 
 // 0x451A08
-int gameSoundFileOpen(const char* fname, int flags, ...)
+int gameSoundFileOpen(const char* fname, int flags)
 {
     if ((flags & 2) != 0) {
         return -1;
@@ -1688,21 +1682,21 @@ void soundEffectCallback(void* userData, int a2)
 // 0x451ADC
 int _gsound_background_allocate(Sound** soundPtr, int a2, int a3)
 {
-    int v5 = 10;
-    int v6 = 0;
+    int soundFlags = SOUND_FLAG_0x02 | SOUND_16BIT;
+    int type = 0;
     if (a2 == 13) {
-        v6 |= 0x01;
+        type |= SOUND_TYPE_MEMORY;
     } else if (a2 == 14) {
-        v6 |= 0x02;
+        type |= SOUND_TYPE_STREAMING;
     }
 
     if (a3 == 15) {
-        v6 |= 0x04;
+        type |= SOUND_TYPE_FIRE_AND_FORGET;
     } else if (a3 == 16) {
-        v5 = 42;
+        soundFlags |= SOUND_LOOPING;
     }
 
-    Sound* sound = soundAllocate(v6, v5);
+    Sound* sound = soundAllocate(type, soundFlags);
     if (sound == NULL) {
         return -1;
     }
@@ -1730,7 +1724,7 @@ int gameSoundFindBackgroundSoundPathWithCopy(char* dest, const char* src)
     }
 
     char outPath[COMPAT_MAX_PATH];
-    sprintf(outPath, "%s%s%s", _sound_music_path1, src, ".ACM");
+    snprintf(outPath, sizeof(outPath), "%s%s%s", _sound_music_path1, src, ".ACM");
     if (_gsound_file_exists_f(outPath)) {
         strncpy(dest, outPath, COMPAT_MAX_PATH);
         dest[COMPAT_MAX_PATH] = '\0';
@@ -1744,7 +1738,7 @@ int gameSoundFindBackgroundSoundPathWithCopy(char* dest, const char* src)
     gameSoundDeleteOldMusicFile();
 
     char inPath[COMPAT_MAX_PATH];
-    sprintf(inPath, "%s%s%s", _sound_music_path2, src, ".ACM");
+    snprintf(inPath, sizeof(inPath), "%s%s%s", _sound_music_path2, src, ".ACM");
 
     FILE* inStream = compat_fopen(inPath, "rb");
     if (inStream == NULL) {
@@ -1816,7 +1810,7 @@ int gameSoundFindBackgroundSoundPathWithCopy(char* dest, const char* src)
 int gameSoundFindBackgroundSoundPath(char* dest, const char* src)
 {
     char path[COMPAT_MAX_PATH];
-    int len;
+    size_t len;
 
     len = strlen(src) + strlen(".ACM");
     if (strlen(_sound_music_path1) + len > COMPAT_MAX_PATH || strlen(_sound_music_path2) + len > COMPAT_MAX_PATH) {
@@ -1831,7 +1825,7 @@ int gameSoundFindBackgroundSoundPath(char* dest, const char* src)
         debugPrint(" finding background sound ");
     }
 
-    sprintf(path, "%s%s%s", _sound_music_path1, src, ".ACM");
+    snprintf(path, sizeof(path), "%s%s%s", _sound_music_path1, src, ".ACM");
     if (_gsound_file_exists_f(path)) {
         strncpy(dest, path, COMPAT_MAX_PATH);
         dest[COMPAT_MAX_PATH] = '\0';
@@ -1842,7 +1836,7 @@ int gameSoundFindBackgroundSoundPath(char* dest, const char* src)
         debugPrint("in 2nd path ");
     }
 
-    sprintf(path, "%s%s%s", _sound_music_path2, src, ".ACM");
+    snprintf(path, sizeof(path), "%s%s%s", _sound_music_path2, src, ".ACM");
     if (_gsound_file_exists_f(path)) {
         strncpy(dest, path, COMPAT_MAX_PATH);
         dest[COMPAT_MAX_PATH] = '\0';
@@ -1875,7 +1869,7 @@ int gameSoundFindSpeechSoundPath(char* dest, const char* src)
         debugPrint(" finding speech sound ");
     }
 
-    sprintf(path, "%s%s%s", _sound_speech_path, src, ".ACM");
+    snprintf(path, sizeof(path), "%s%s%s", _sound_speech_path, src, ".ACM");
 
     // Check for existence by getting file size.
     int fileSize;
@@ -1899,7 +1893,7 @@ void gameSoundDeleteOldMusicFile()
 {
     if (_background_fname_copied[0] != '\0') {
         char path[COMPAT_MAX_PATH];
-        sprintf(path, "%s%s%s", "sound\\music\\", _background_fname_copied, ".ACM");
+        snprintf(path, sizeof(path), "%s%s%s", "sound\\music\\", _background_fname_copied, ".ACM");
         if (compat_remove(path)) {
             if (gGameSoundDebugEnabled) {
                 debugPrint("Deleting old music file failed.\n");
@@ -1958,35 +1952,37 @@ int speechPlay()
     return 0;
 }
 
+// TODO: Refactor to use Settings.
+//
 // 0x452208
 int _gsound_get_music_path(char** out_value, const char* key)
 {
-    int v3;
-    char* v4;
+    size_t len;
+    char* copy;
     char* value;
 
     configGetString(&gGameConfig, GAME_CONFIG_SOUND_KEY, key, out_value);
 
     value = *out_value;
-    v3 = strlen(value) + 1;
+    len = strlen(value);
 
-    if (*(value + v3 - 2) == '\\') {
+    if (value[len - 1] == '\\' || value[len - 1] == '/') {
         return 0;
     }
 
-    v4 = (char*)internal_malloc(v3 - 1 + 2);
-    if (v4 == NULL) {
+    copy = (char*)internal_malloc(len + 2);
+    if (copy == NULL) {
         if (gGameSoundDebugEnabled) {
             debugPrint("Out of memory in gsound_get_music_path.\n");
         }
         return -1;
     }
 
-    strcpy(v4, value);
-    *(v4 + v3) = '\\';
-    *(v4 + v3 + 1) = '\0';
+    strcpy(copy, value);
+    copy[len] = '\\';
+    copy[len + 1] = '\0';
 
-    if (configSetString(&gGameConfig, GAME_CONFIG_SOUND_KEY, key, v4) != 1) {
+    if (configSetString(&gGameConfig, GAME_CONFIG_SOUND_KEY, key, copy) != 1) {
         if (gGameSoundDebugEnabled) {
             debugPrint("config_set_string failed in gsound_music_path.\n");
         }
@@ -1995,7 +1991,7 @@ int _gsound_get_music_path(char** out_value, const char* key)
     }
 
     if (configGetString(&gGameConfig, GAME_CONFIG_SOUND_KEY, key, out_value)) {
-        internal_free(v4);
+        internal_free(copy);
         return 0;
     }
 
@@ -2011,7 +2007,7 @@ Sound* _gsound_get_sound_ready_for_effect()
 {
     int rc;
 
-    Sound* sound = soundAllocate(5, 10);
+    Sound* sound = soundAllocate(SOUND_TYPE_MEMORY | SOUND_TYPE_FIRE_AND_FORGET, SOUND_FLAG_0x02 | SOUND_16BIT);
     if (sound == NULL) {
         if (gGameSoundDebugEnabled) {
             debugPrint(" Can't allocate sound for effect. ");
@@ -2104,8 +2100,8 @@ int ambientSoundEffectEventProcess(Object* a1, void* data)
     if (soundEffectEvent != NULL) {
         ambientSoundEffectIndex = soundEffectEvent->ambientSoundEffectIndex;
     } else {
-        if (ambientSoundEffectGetLength() > 0) {
-            ambientSoundEffectIndex = ambientSoundEffectGetRandom();
+        if (wmSfxMaxCount() > 0) {
+            ambientSoundEffectIndex = wmSfxRollNextIdx();
         }
     }
 
@@ -2119,8 +2115,8 @@ int ambientSoundEffectEventProcess(Object* a1, void* data)
     }
 
     int delay = 10 * randomBetween(15, 20);
-    if (ambientSoundEffectGetLength() > 0) {
-        nextSoundEffectEvent->ambientSoundEffectIndex = ambientSoundEffectGetRandom();
+    if (wmSfxMaxCount() > 0) {
+        nextSoundEffectEvent->ambientSoundEffectIndex = wmSfxRollNextIdx();
         if (queueAddEvent(delay, NULL, nextSoundEffectEvent, EVENT_TYPE_GSOUND_SFX_EVENT) == -1) {
             return -1;
         }
@@ -2132,7 +2128,7 @@ int ambientSoundEffectEventProcess(Object* a1, void* data)
 
     if (ambientSoundEffectIndex != -1) {
         char* fileName;
-        if (ambientSoundEffectGetName(ambientSoundEffectIndex, &fileName) == 0) {
+        if (wmSfxIdxName(ambientSoundEffectIndex, &fileName) == 0) {
             int v7 = _get_bk_time();
             if (getTicksBetween(v7, _lastTime_1) >= 5000) {
                 if (soundPlayFile(fileName) == -1) {
@@ -2147,3 +2143,5 @@ int ambientSoundEffectEventProcess(Object* a1, void* data)
 
     return 0;
 }
+
+} // namespace fallout

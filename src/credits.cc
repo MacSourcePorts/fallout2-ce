@@ -1,25 +1,29 @@
 #include "credits.h"
 
+#include <string.h>
+
+#include <algorithm>
+
 #include "art.h"
 #include "color.h"
-#include "core.h"
 #include "cycle.h"
 #include "db.h"
 #include "debug.h"
 #include "draw.h"
 #include "game_mouse.h"
+#include "input.h"
 #include "memory.h"
 #include "message.h"
+#include "mouse.h"
 #include "palette.h"
 #include "platform_compat.h"
 #include "sound.h"
+#include "svga.h"
 #include "text_font.h"
 #include "window_manager.h"
 
-#include <string.h>
+namespace fallout {
 
-#define CREDITS_WINDOW_WIDTH (640)
-#define CREDITS_WINDOW_HEIGHT (480)
 #define CREDITS_WINDOW_SCROLLING_DELAY (38)
 
 static bool creditsFileParseNextLine(char* dest, int* font, int* color);
@@ -61,7 +65,7 @@ void creditsOpen(const char* filePath, int backgroundFid, bool useReversedStyle)
     soundContinueAll();
 
     char localizedPath[COMPAT_MAX_PATH];
-    if (_message_make_path(localizedPath, filePath)) {
+    if (_message_make_path(localizedPath, sizeof(localizedPath), filePath)) {
         gCreditsFile = fileOpen(localizedPath, "rt");
         if (gCreditsFile != NULL) {
             soundContinueAll();
@@ -74,39 +78,35 @@ void creditsOpen(const char* filePath, int backgroundFid, bool useReversedStyle)
                 mouseShowCursor();
             }
 
-            int creditsWindowX = (screenGetWidth() - CREDITS_WINDOW_WIDTH) / 2;
-            int creditsWindowY = (screenGetHeight() - CREDITS_WINDOW_HEIGHT) / 2;
-            int window = windowCreate(creditsWindowX, creditsWindowY, CREDITS_WINDOW_WIDTH, CREDITS_WINDOW_HEIGHT, _colorTable[0], 20);
+            int windowWidth = screenGetWidth();
+            int windowHeight = screenGetHeight();
+            int window = windowCreate(0, 0, windowWidth, windowHeight, _colorTable[0], 20);
             soundContinueAll();
             if (window != -1) {
                 unsigned char* windowBuffer = windowGetBuffer(window);
                 if (windowBuffer != NULL) {
-                    unsigned char* backgroundBuffer = (unsigned char*)internal_malloc(CREDITS_WINDOW_WIDTH * CREDITS_WINDOW_HEIGHT);
+                    unsigned char* backgroundBuffer = (unsigned char*)internal_malloc(windowWidth * windowHeight);
                     if (backgroundBuffer) {
                         soundContinueAll();
 
-                        memset(backgroundBuffer, _colorTable[0], CREDITS_WINDOW_WIDTH * CREDITS_WINDOW_HEIGHT);
+                        memset(backgroundBuffer, _colorTable[0], windowWidth * windowHeight);
 
                         if (backgroundFid != -1) {
-                            CacheEntry* backgroundFrmHandle;
-                            Art* frm = artLock(backgroundFid, &backgroundFrmHandle);
-                            if (frm != NULL) {
-                                int width = artGetWidth(frm, 0, 0);
-                                int height = artGetHeight(frm, 0, 0);
-                                unsigned char* backgroundFrmData = artGetFrameData(frm, 0, 0);
-                                blitBufferToBuffer(backgroundFrmData,
-                                    width,
-                                    height,
-                                    width,
-                                    backgroundBuffer + CREDITS_WINDOW_WIDTH * ((CREDITS_WINDOW_HEIGHT - height) / 2) + (CREDITS_WINDOW_WIDTH - width) / 2,
-                                    CREDITS_WINDOW_WIDTH);
-                                artUnlock(backgroundFrmHandle);
+                            FrmImage backgroundFrmImage;
+                            if (backgroundFrmImage.lock(backgroundFid)) {
+                                blitBufferToBuffer(backgroundFrmImage.getData(),
+                                    backgroundFrmImage.getWidth(),
+                                    backgroundFrmImage.getHeight(),
+                                    backgroundFrmImage.getWidth(),
+                                    backgroundBuffer + windowWidth * ((windowHeight - backgroundFrmImage.getHeight()) / 2) + (windowWidth - backgroundFrmImage.getWidth()) / 2,
+                                    windowWidth);
+                                backgroundFrmImage.unlock();
                             }
                         }
 
-                        unsigned char* intermediateBuffer = (unsigned char*)internal_malloc(CREDITS_WINDOW_WIDTH * CREDITS_WINDOW_HEIGHT);
+                        unsigned char* intermediateBuffer = (unsigned char*)internal_malloc(windowWidth * windowHeight);
                         if (intermediateBuffer != NULL) {
-                            memset(intermediateBuffer, 0, CREDITS_WINDOW_WIDTH * CREDITS_WINDOW_HEIGHT);
+                            memset(intermediateBuffer, 0, windowWidth * windowHeight);
 
                             fontSetCurrent(gCreditsWindowTitleFont);
                             int titleFontLineHeight = fontGetLineHeight();
@@ -114,22 +114,21 @@ void creditsOpen(const char* filePath, int backgroundFid, bool useReversedStyle)
                             fontSetCurrent(gCreditsWindowNameFont);
                             int nameFontLineHeight = fontGetLineHeight();
 
-                            int lineHeight = nameFontLineHeight + (titleFontLineHeight >= nameFontLineHeight ? titleFontLineHeight - nameFontLineHeight : 0);
-                            int stringBufferSize = CREDITS_WINDOW_WIDTH * lineHeight;
+                            int lineHeight = std::max(titleFontLineHeight, nameFontLineHeight);
+                            int stringBufferSize = windowWidth * lineHeight;
                             unsigned char* stringBuffer = (unsigned char*)internal_malloc(stringBufferSize);
                             if (stringBuffer != NULL) {
                                 blitBufferToBuffer(backgroundBuffer,
-                                    CREDITS_WINDOW_WIDTH,
-                                    CREDITS_WINDOW_HEIGHT,
-                                    CREDITS_WINDOW_WIDTH,
+                                    windowWidth,
+                                    windowHeight,
+                                    windowWidth,
                                     windowBuffer,
-                                    CREDITS_WINDOW_WIDTH);
+                                    windowWidth);
 
                                 windowRefresh(window);
 
                                 paletteFadeTo(_cmap);
 
-                                unsigned char* v40 = intermediateBuffer + CREDITS_WINDOW_WIDTH * CREDITS_WINDOW_HEIGHT - CREDITS_WINDOW_WIDTH;
                                 char str[260];
                                 int font;
                                 int color;
@@ -138,47 +137,52 @@ void creditsOpen(const char* filePath, int backgroundFid, bool useReversedStyle)
                                 while (creditsFileParseNextLine(str, &font, &color)) {
                                     fontSetCurrent(font);
 
-                                    int v19 = fontGetStringWidth(str);
-                                    if (v19 >= CREDITS_WINDOW_WIDTH) {
+                                    int stringWidth = fontGetStringWidth(str);
+                                    if (stringWidth >= windowWidth) {
                                         continue;
                                     }
 
                                     memset(stringBuffer, 0, stringBufferSize);
-                                    fontDrawText(stringBuffer, str, CREDITS_WINDOW_WIDTH, CREDITS_WINDOW_WIDTH, color);
+                                    fontDrawText(stringBuffer, str, windowWidth, windowWidth, color);
 
-                                    unsigned char* dest = intermediateBuffer + CREDITS_WINDOW_WIDTH * CREDITS_WINDOW_HEIGHT - CREDITS_WINDOW_WIDTH + (CREDITS_WINDOW_WIDTH - v19) / 2;
+                                    unsigned char* dest = intermediateBuffer + windowWidth * windowHeight - windowWidth + (windowWidth - stringWidth) / 2;
                                     unsigned char* src = stringBuffer;
                                     for (int index = 0; index < lineHeight; index++) {
-                                        if (_get_input() != -1) {
+                                        sharedFpsLimiter.mark();
+
+                                        if (inputGetInput() != -1) {
                                             stop = true;
                                             break;
                                         }
 
-                                        memmove(intermediateBuffer, intermediateBuffer + CREDITS_WINDOW_WIDTH, CREDITS_WINDOW_WIDTH * CREDITS_WINDOW_HEIGHT - CREDITS_WINDOW_WIDTH);
-                                        memcpy(dest, src, v19);
+                                        memmove(intermediateBuffer, intermediateBuffer + windowWidth, windowWidth * windowHeight - windowWidth);
+                                        memcpy(dest, src, stringWidth);
 
                                         blitBufferToBuffer(backgroundBuffer,
-                                            CREDITS_WINDOW_WIDTH,
-                                            CREDITS_WINDOW_HEIGHT,
-                                            CREDITS_WINDOW_WIDTH,
+                                            windowWidth,
+                                            windowHeight,
+                                            windowWidth,
                                             windowBuffer,
-                                            CREDITS_WINDOW_WIDTH);
+                                            windowWidth);
 
                                         blitBufferToBufferTrans(intermediateBuffer,
-                                            CREDITS_WINDOW_WIDTH,
-                                            CREDITS_WINDOW_HEIGHT,
-                                            CREDITS_WINDOW_WIDTH,
+                                            windowWidth,
+                                            windowHeight,
+                                            windowWidth,
                                             windowBuffer,
-                                            CREDITS_WINDOW_WIDTH);
+                                            windowWidth);
 
                                         while (getTicksSince(tick) < CREDITS_WINDOW_SCROLLING_DELAY) {
                                         }
 
-                                        tick = _get_time();
+                                        tick = getTicks();
 
                                         windowRefresh(window);
 
-                                        src += CREDITS_WINDOW_WIDTH;
+                                        src += windowWidth;
+
+                                        sharedFpsLimiter.throttle();
+                                        renderPresent();
                                     }
 
                                     if (stop) {
@@ -187,34 +191,39 @@ void creditsOpen(const char* filePath, int backgroundFid, bool useReversedStyle)
                                 }
 
                                 if (!stop) {
-                                    for (int index = 0; index < CREDITS_WINDOW_HEIGHT; index++) {
-                                        if (_get_input() != -1) {
+                                    for (int index = 0; index < windowHeight; index++) {
+                                        sharedFpsLimiter.mark();
+
+                                        if (inputGetInput() != -1) {
                                             break;
                                         }
 
-                                        memmove(intermediateBuffer, intermediateBuffer + CREDITS_WINDOW_WIDTH, CREDITS_WINDOW_WIDTH * CREDITS_WINDOW_HEIGHT - CREDITS_WINDOW_WIDTH);
-                                        memset(intermediateBuffer + CREDITS_WINDOW_WIDTH * CREDITS_WINDOW_HEIGHT - CREDITS_WINDOW_WIDTH, 0, CREDITS_WINDOW_WIDTH);
+                                        memmove(intermediateBuffer, intermediateBuffer + windowWidth, windowWidth * windowHeight - windowWidth);
+                                        memset(intermediateBuffer + windowWidth * windowHeight - windowWidth, 0, windowWidth);
 
                                         blitBufferToBuffer(backgroundBuffer,
-                                            CREDITS_WINDOW_WIDTH,
-                                            CREDITS_WINDOW_HEIGHT,
-                                            CREDITS_WINDOW_WIDTH,
+                                            windowWidth,
+                                            windowHeight,
+                                            windowWidth,
                                             windowBuffer,
-                                            CREDITS_WINDOW_WIDTH);
+                                            windowWidth);
 
                                         blitBufferToBufferTrans(intermediateBuffer,
-                                            CREDITS_WINDOW_WIDTH,
-                                            CREDITS_WINDOW_HEIGHT,
-                                            CREDITS_WINDOW_WIDTH,
+                                            windowWidth,
+                                            windowHeight,
+                                            windowWidth,
                                             windowBuffer,
-                                            CREDITS_WINDOW_WIDTH);
+                                            windowWidth);
 
                                         while (getTicksSince(tick) < CREDITS_WINDOW_SCROLLING_DELAY) {
                                         }
 
-                                        tick = _get_time();
+                                        tick = getTicks();
 
                                         windowRefresh(window);
+
+                                        sharedFpsLimiter.throttle();
+                                        renderPresent();
                                     }
                                 }
 
@@ -274,3 +283,5 @@ static bool creditsFileParseNextLine(char* dest, int* font, int* color)
 
     return false;
 }
+
+} // namespace fallout

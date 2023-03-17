@@ -1,9 +1,11 @@
 #ifndef LIPS_H
 #define LIPS_H
 
+#include <stddef.h>
+
 #include "sound.h"
 
-#include <stddef.h>
+namespace fallout {
 
 #define PHONEME_COUNT (42)
 
@@ -53,5 +55,7 @@ void lipsTicker();
 int lipsStart();
 int lipsLoad(const char* audioFileName, const char* headFileName);
 int lipsFree();
+
+} // namespace fallout
 
 #endif /* LIPS_H */

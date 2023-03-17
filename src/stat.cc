@@ -1,8 +1,11 @@
 #include "stat.h"
 
+#include <stdio.h>
+
+#include <algorithm>
+
 #include "art.h"
 #include "combat.h"
-#include "core.h"
 #include "critter.h"
 #include "display_monitor.h"
 #include "game.h"
@@ -19,12 +22,11 @@
 #include "random.h"
 #include "scripts.h"
 #include "skill.h"
+#include "svga.h"
 #include "tile.h"
 #include "trait.h"
 
-#include <stdio.h>
-
-#include <algorithm>
+namespace fallout {
 
 // Provides metadata about stats.
 typedef struct StatDescription {
@@ -109,7 +111,7 @@ int statsInit()
     }
 
     char path[COMPAT_MAX_PATH];
-    sprintf(path, "%s%s", asc_5186C8, "stat.msg");
+    snprintf(path, sizeof(path), "%s%s", asc_5186C8, "stat.msg");
 
     if (!messageListLoad(&gStatsMessageList, path)) {
         return -1;
@@ -129,6 +131,8 @@ int statsInit()
         gStatValueDescriptions[index] = getmsg(&gStatsMessageList, &messageListItem, 301 + index);
     }
 
+    messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_STAT, &gStatsMessageList);
+
     return 0;
 }
 
@@ -144,6 +148,7 @@ int statsReset()
 // 0x4AEEE4
 int statsExit()
 {
+    messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_STAT, nullptr);
     messageListFree(&gStatsMessageList);
 
     return 0;
@@ -717,14 +722,16 @@ int statRoll(Object* critter, int stat, int modifier, int* howMuch)
 }
 
 // 0x4AFAA8
-int pcAddExperience(int xp)
+int pcAddExperience(int xp, int* xpGained)
 {
-    return pcAddExperienceWithOptions(xp, true);
+    return pcAddExperienceWithOptions(xp, true, xpGained);
 }
 
 // 0x4AFAB8
-int pcAddExperienceWithOptions(int xp, bool a2)
+int pcAddExperienceWithOptions(int xp, bool a2, int* xpGained)
 {
+    int oldXp = gPcStatValues[PC_STAT_EXPERIENCE];
+
     int newXp = gPcStatValues[PC_STAT_EXPERIENCE];
     newXp += xp;
     newXp += perkGetRank(gDude, PERK_SWIFT_LEARNER) * 5 * xp / 100;
@@ -772,10 +779,20 @@ int pcAddExperienceWithOptions(int xp, bool a2)
 
             interfaceRenderHitPoints(false);
 
+            // SFALL: Update unarmed attack after leveling up.
+            int leftItemAction;
+            int rightItemAction;
+            interfaceGetItemActions(&leftItemAction, &rightItemAction);
+            interfaceUpdateItems(false, leftItemAction, rightItemAction);
+
             if (a2) {
                 _partyMemberIncLevels();
             }
         }
+    }
+
+    if (xpGained != NULL) {
+        *xpGained = newXp - oldXp;
     }
 
     return 0;
@@ -814,3 +831,5 @@ int pcSetExperience(int xp)
 
     return 0;
 }
+
+} // namespace fallout

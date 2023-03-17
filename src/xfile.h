@@ -1,12 +1,14 @@
 #ifndef XFILE_H
 #define XFILE_H
 
-#include "dfile.h"
+#include <stdio.h>
 
+#include <zlib.h>
+
+#include "dfile.h"
 #include "platform_compat.h"
 
-#include <stdio.h>
-#include <zlib.h>
+namespace fallout {
 
 typedef enum XFileType {
     XFILE_TYPE_FILE,
@@ -65,5 +67,7 @@ bool xbaseReopenAll(char* paths);
 bool xbaseOpen(const char* path);
 bool xlistInit(const char* pattern, XList* xlist);
 void xlistFree(XList* xlist);
+
+} // namespace fallout
 
 #endif /* XFILE_H */

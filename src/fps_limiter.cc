@@ -2,7 +2,9 @@
 
 #include <SDL.h>
 
-FpsLimiter::FpsLimiter(std::size_t fps)
+namespace fallout {
+
+FpsLimiter::FpsLimiter(unsigned int fps)
     : _fps(fps)
     , _ticks(0)
 {
@@ -19,3 +21,5 @@ void FpsLimiter::throttle() const
         SDL_Delay(1000 / _fps - (SDL_GetTicks() - _ticks));
     }
 }
+
+} // namespace fallout

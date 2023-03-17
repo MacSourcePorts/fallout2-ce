@@ -1,11 +1,13 @@
 #include "export.h"
 
+#include <ctype.h>
+#include <string.h>
+
 #include "interpreter_lib.h"
 #include "memory_manager.h"
 #include "platform_compat.h"
 
-#include <ctype.h>
-#include <string.h>
+namespace fallout {
 
 typedef struct ExternalVariable {
     char name[32];
@@ -176,12 +178,11 @@ int externalVariableSetValue(Program* program, const char* name, ProgramValue& p
         return 1;
     }
 
-
-    if ((exportedVariable->value.opcode & 0xF7FF) == VALUE_TYPE_STRING) {
+    if ((exportedVariable->value.opcode & VALUE_TYPE_MASK) == VALUE_TYPE_STRING) {
         internal_free_safe(exportedVariable->stringValue, __FILE__, __LINE__); // "..\\int\\EXPORT.C", 169
     }
 
-    if ((programValue.opcode & 0xF7FF) == VALUE_TYPE_STRING) {
+    if ((programValue.opcode & VALUE_TYPE_MASK) == VALUE_TYPE_STRING) {
         if (program != NULL) {
             const char* stringValue = programGetString(program, programValue.opcode, programValue.integerValue);
             exportedVariable->value.opcode = VALUE_TYPE_DYNAMIC_STRING;
@@ -204,7 +205,7 @@ int externalVariableGetValue(Program* program, const char* name, ProgramValue& v
         return 1;
     }
 
-    if ((exportedVariable->value.opcode & 0xF7FF) == VALUE_TYPE_STRING) {
+    if ((exportedVariable->value.opcode & VALUE_TYPE_MASK) == VALUE_TYPE_STRING) {
         value.opcode = exportedVariable->value.opcode;
         value.integerValue = programPushString(program, exportedVariable->stringValue);
     } else {
@@ -225,7 +226,7 @@ int externalVariableCreate(Program* program, const char* identifier)
             return 1;
         }
 
-        if ((exportedVariable->value.opcode & 0xF7FF) == VALUE_TYPE_STRING) {
+        if ((exportedVariable->value.opcode & VALUE_TYPE_MASK) == VALUE_TYPE_STRING) {
             internal_free_safe(exportedVariable->stringValue, __FILE__, __LINE__); // "..\\int\\EXPORT.C", 234
         }
     } else {
@@ -261,7 +262,7 @@ void _removeProgramReferences(Program* program)
 // 0x44152C
 void _initExport()
 {
-    _interpretRegisterProgramDeleteCallback(_removeProgramReferences);
+    intLibRegisterProgramDeleteCallback(_removeProgramReferences);
 }
 
 // 0x441538
@@ -328,7 +329,7 @@ void _exportClearAllVariables()
     for (int index = 0; index < 1013; index++) {
         ExternalVariable* exportedVariable = &(gExternalVariables[index]);
         if (exportedVariable->name[0] != '\0') {
-            if ((exportedVariable->value.opcode & 0xF7FF) == VALUE_TYPE_STRING) {
+            if ((exportedVariable->value.opcode & VALUE_TYPE_MASK) == VALUE_TYPE_STRING) {
                 if (exportedVariable->stringValue != NULL) {
                     internal_free_safe(exportedVariable->stringValue, __FILE__, __LINE__); // "..\\int\\EXPORT.C", 387
                 }
@@ -344,3 +345,5 @@ void _exportClearAllVariables()
         }
     }
 }
+
+} // namespace fallout

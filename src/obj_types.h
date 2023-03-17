@@ -1,6 +1,8 @@
 #ifndef OBJ_TYPES_H
 #define OBJ_TYPES_H
 
+namespace fallout {
+
 // Rotation
 typedef enum Rotation {
     ROTATION_NE, // 0
@@ -27,6 +29,10 @@ enum {
     OBJ_TYPE_COUNT,
 };
 
+#define FID_TYPE(value) ((value) & 0xF000000) >> 24
+#define PID_TYPE(value) (value) >> 24
+#define SID_TYPE(value) (value) >> 24
+
 typedef enum OutlineType {
     OUTLINE_TYPE_HOSTILE = 1,
     OUTLINE_TYPE_2 = 2,
@@ -38,14 +44,31 @@ typedef enum OutlineType {
 
 typedef enum ObjectFlags {
     OBJECT_HIDDEN = 0x01,
-    OBJECT_TEMPORARY = 0x04,
+
+    // Specifies that the object should not be saved to the savegame file.
+    //
+    // This flag is used in these situations:
+    //  - To prevent saving of system objects like dude (which has separate
+    // saving routine), egg, mouse cursors, etc.
+    //  - To prevent saving of temporary objects (projectiles, explosion
+    // effects, etc.).
+    //  - To prevent saving of objects which cannot be removed for some reason,
+    // like objects trying to delete themselves from scripting engine (used
+    // together with `OBJECT_HIDDEN` to prevent affecting game world).
+    OBJECT_NO_SAVE = 0x04,
     OBJECT_FLAT = 0x08,
     OBJECT_NO_BLOCK = 0x10,
     OBJECT_LIGHTING = 0x20,
-    OBJECT_FLAG_0x400 = 0x400, // ???
+
+    // Specifies that the object should not be removed (freed) from the game
+    // world for whatever reason.
+    //
+    // This flag is used to prevent freeing of system objects like dude, egg,
+    // mouse cursors, etc.
+    OBJECT_NO_REMOVE = 0x400,
     OBJECT_MULTIHEX = 0x800,
     OBJECT_NO_HIGHLIGHT = 0x1000,
-    OBJECT_USED = 0x2000, // set if there was/is any event for the object
+    OBJECT_QUEUED = 0x2000, // set if there was/is any event for the object
     OBJECT_TRANS_RED = 0x4000,
     OBJECT_TRANS_NONE = 0x8000,
     OBJECT_TRANS_WALL = 0x10000,
@@ -66,6 +89,22 @@ typedef enum ObjectFlags {
     OBJECT_OPEN_DOOR = OBJECT_SHOOT_THRU | OBJECT_LIGHT_THRU | OBJECT_NO_BLOCK,
 } ObjectFlags;
 
+typedef enum CritterFlags {
+    CRITTER_BARTER = 0x02,
+    CRITTER_NO_STEAL = 0x20,
+    CRITTER_NO_DROP = 0x40,
+    CRITTER_NO_LIMBS = 0x80,
+    CRITTER_NO_AGE = 0x100,
+    CRITTER_NO_HEAL = 0x200,
+    CRITTER_INVULNERABLE = 0x400,
+    CRITTER_FLAT = 0x800,
+    CRITTER_SPECIAL_DEATH = 0x1000,
+    CRITTER_LONG_LIMBS = 0x2000,
+    CRITTER_NO_KNOCKBACK = 0x4000,
+} CritterFlags;
+
+#define CRITTER_RADIATED 0x02
+
 #define OUTLINE_TYPE_MASK 0xFFFFFF
 #define OUTLINE_PALETTED 0x40000000
 #define OUTLINE_DISABLED 0x80000000
@@ -77,9 +116,12 @@ typedef enum ObjectFlags {
 #define CONTAINER_FLAG_LOCKED 0x02000000
 #define DOOR_FLAG_LOCKED 0x02000000
 
-#define CRITTER_MANEUVER_0x01 0x01
-#define CRITTER_MANEUVER_STOP_ATTACKING 0x02
-#define CRITTER_MANUEVER_FLEEING 0x04
+typedef enum CritterManeuver {
+    CRITTER_MANEUVER_NONE = 0,
+    CRITTER_MANEUVER_ENGAGING = 0x01,
+    CRITTER_MANEUVER_DISENGAGING = 0x02,
+    CRITTER_MANUEVER_FLEEING = 0x04,
+} CritterManeuver;
 
 typedef enum Dam {
     DAM_KNOCKED_OUT = 0x01,
@@ -178,18 +220,18 @@ typedef struct DoorSceneryData {
 } DoorSceneryData;
 
 typedef struct StairsSceneryData {
-    int field_0; // obj_pudg.pudstairs.destMap
-    int field_4; // obj_pudg.pudstairs.destBuiltTile
+    int destinationMap; // obj_pudg.pudstairs.destMap
+    int destinationBuiltTile; // obj_pudg.pudstairs.destBuiltTile
 } StairsSceneryData;
 
 typedef struct ElevatorSceneryData {
-    int field_0; // obj_pudg.pudelevator.elevType
-    int field_4; // obj_pudg.pudelevator.elevLevel
+    int type;
+    int level;
 } ElevatorSceneryData;
 
 typedef struct LadderSceneryData {
-    int field_0;
-    int field_4;
+    int destinationMap;
+    int destinationBuiltTile;
 } LadderSceneryData;
 
 typedef union SceneryObjectData {
@@ -251,5 +293,33 @@ typedef struct ObjectListNode {
     Object* obj;
     struct ObjectListNode* next;
 } ObjectListNode;
+
+#define BUILT_TILE_TILE_MASK 0x3FFFFFF
+#define BUILT_TILE_ELEVATION_MASK 0xE0000000
+#define BUILT_TILE_ELEVATION_SHIFT 29
+#define BUILT_TILE_ROTATION_MASK 0x1C000000
+#define BUILT_TILE_ROTATION_SHIFT 26
+
+static inline int builtTileGetTile(int builtTile)
+{
+    return builtTile & BUILT_TILE_TILE_MASK;
+}
+
+static inline int builtTileGetElevation(int builtTile)
+{
+    return (builtTile & BUILT_TILE_ELEVATION_MASK) >> BUILT_TILE_ELEVATION_SHIFT;
+}
+
+static inline int builtTileGetRotation(int builtTile)
+{
+    return (builtTile & BUILT_TILE_ROTATION_MASK) >> BUILT_TILE_ROTATION_SHIFT;
+}
+
+static inline int builtTileCreate(int tile, int elevation)
+{
+    return tile | ((elevation << BUILT_TILE_ELEVATION_SHIFT) & BUILT_TILE_ELEVATION_MASK);
+}
+
+} // namespace fallout
 
 #endif /* OBJ_TYPES_H */

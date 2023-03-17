@@ -1,9 +1,11 @@
 #include "select_file_list.h"
 
-#include "db.h"
-
 #include <stdlib.h>
 #include <string.h>
+
+#include "db.h"
+
+namespace fallout {
 
 // 0x4AA250
 int _compare(const void* a1, const void* a2)
@@ -33,3 +35,5 @@ void _freeFileList(char** fileList)
 {
     fileNameListFree(&fileList, 0);
 }
+
+} // namespace fallout

@@ -6,11 +6,16 @@
 #include "interpreter.h"
 #include "obj_types.h"
 
+namespace fallout {
+
 #define SCRIPT_FLAG_0x01 (0x01)
 #define SCRIPT_FLAG_0x02 (0x02)
 #define SCRIPT_FLAG_0x04 (0x04)
 #define SCRIPT_FLAG_0x08 (0x08)
 #define SCRIPT_FLAG_0x10 (0x10)
+
+// 60 * 60 * 10
+#define GAME_TIME_TICKS_PER_HOUR 36000
 
 // 24 * 60 * 60 * 10
 #define GAME_TIME_TICKS_PER_DAY (864000)
@@ -175,6 +180,7 @@ void scriptsRequestDialog(Object* a1);
 void scriptsRequestEndgame();
 int scriptsRequestLooting(Object* a1, Object* a2);
 int scriptsRequestStealing(Object* a1, Object* a2);
+void _script_make_path(char* path);
 int scriptExecProc(int sid, int proc);
 bool scriptHasProc(int sid, int proc);
 int _scr_find_str_run_info(int a1, int* a2, int sid);
@@ -201,6 +207,8 @@ int scriptAdd(int* sidPtr, int scriptType);
 int scriptRemove(int index);
 int _scr_remove_all();
 int _scr_remove_all_force();
+Script* scriptGetFirstSpatialScript(int elevation);
+Script* scriptGetNextSpatialScript();
 void _scr_spatials_enable();
 void _scr_spatials_disable();
 bool scriptsExecSpatialProc(Object* obj, int tile, int elevation);
@@ -211,9 +219,11 @@ void scriptsExecMapUpdateScripts(int a1);
 void scriptsExecMapExitProc();
 char* _scr_get_msg_str(int messageListId, int messageId);
 char* _scr_get_msg_str_speech(int messageListId, int messageId, int a3);
-int scriptGetLocalVar(int a1, int a2, int* a3);
-int scriptSetLocalVar(int a1, int a2, int a3);
+int scriptGetLocalVar(int sid, int var, ProgramValue& value);
+int scriptSetLocalVar(int sid, int var, ProgramValue& value);
 bool _scr_end_combat();
 int _scr_explode_scenery(Object* a1, int tile, int radius, int elevation);
+
+} // namespace fallout
 
 #endif /* SCRIPTS_H */

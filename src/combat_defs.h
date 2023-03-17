@@ -10,6 +10,8 @@
 #define WEAPON_CRITICAL_FAILURE_TYPE_COUNT (7)
 #define WEAPON_CRITICAL_FAILURE_EFFECT_COUNT (5)
 
+namespace fallout {
+
 typedef enum CombatState {
     COMBAT_STATE_0x01 = 0x01,
     COMBAT_STATE_0x02 = 0x02,
@@ -84,13 +86,6 @@ typedef enum HitLocation {
     HIT_LOCATION_SPECIFIC_COUNT = HIT_LOCATION_COUNT - 1,
 } HitLocation;
 
-typedef struct STRUCT_510948 {
-    Object* field_0;
-    Object* field_4;
-    Object* field_8;
-    int field_C;
-} STRUCT_510948;
-
 typedef struct STRUCT_664980 {
     Object* attacker;
     Object* defender;
@@ -128,25 +123,54 @@ typedef struct Attack {
     int extrasKnockback[EXPLOSION_TARGET_COUNT];
 } Attack;
 
+typedef enum CriticalHitDescriptionDataMember {
+    CRIT_DATA_MEMBER_DAMAGE_MULTIPLIER,
+    CRIT_DATA_MEMBER_FLAGS,
+    CRIT_DATA_MEMBER_MASSIVE_CRITICAL_STAT,
+    CRIT_DATA_MEMBER_MASSIVE_CRITICAL_STAT_MODIFIER,
+    CRIT_DATA_MEMBER_MASSIVE_CRITICAL_FLAGS,
+    CRIT_DATA_MEMBER_MESSAGE_ID,
+    CRIT_DATA_MEMBER_MASSIVE_CRITICAL_MESSAGE_ID,
+    CRIT_DATA_MEMBER_COUNT,
+} CriticalHitDescriptionDataMember;
+
 // Provides metadata about critical hit effect.
-typedef struct CriticalHitDescription {
-    int damageMultiplier;
+typedef union CriticalHitDescription {
+    struct {
+        int damageMultiplier;
 
-    // Damage flags that will be applied to defender.
-    int flags;
+        // Damage flags that will be applied to defender.
+        int flags;
 
-    // Stat to check to upgrade this critical hit to massive critical hit or
-    // -1 if there is no massive critical hit.
-    int massiveCriticalStat;
+        // Stat to check to upgrade this critical hit to massive critical hit or
+        // -1 if there is no massive critical hit.
+        int massiveCriticalStat;
 
-    // Bonus/penalty to massive critical stat.
-    int massiveCriticalStatModifier;
+        // Bonus/penalty to massive critical stat.
+        int massiveCriticalStatModifier;
 
-    // Additional damage flags if this critical hit become massive critical.
-    int massiveCriticalFlags;
+        // Additional damage flags if this critical hit become massive critical.
+        int massiveCriticalFlags;
 
-    int messageId;
-    int massiveCriticalMessageId;
+        int messageId;
+        int massiveCriticalMessageId;
+    };
+
+    // SFALL: Allow indexed access to the data above.
+    int values[CRIT_DATA_MEMBER_COUNT];
 } CriticalHitDescription;
+
+typedef enum CombatBadShot {
+    COMBAT_BAD_SHOT_OK = 0,
+    COMBAT_BAD_SHOT_NO_AMMO = 1,
+    COMBAT_BAD_SHOT_OUT_OF_RANGE = 2,
+    COMBAT_BAD_SHOT_NOT_ENOUGH_AP = 3,
+    COMBAT_BAD_SHOT_ALREADY_DEAD = 4,
+    COMBAT_BAD_SHOT_AIM_BLOCKED = 5,
+    COMBAT_BAD_SHOT_ARM_CRIPPLED = 6,
+    COMBAT_BAD_SHOT_BOTH_ARMS_CRIPPLED = 7,
+} CombatBadShot;
+
+} // namespace fallout
 
 #endif /* COMBAT_DEFS_H */

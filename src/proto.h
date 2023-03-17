@@ -7,6 +7,8 @@
 #include "platform_compat.h"
 #include "proto_types.h"
 
+namespace fallout {
+
 typedef enum ItemDataMember {
     ITEM_DATA_MEMBER_PID = 0,
     ITEM_DATA_MEMBER_NAME = 1,
@@ -100,6 +102,7 @@ extern char _cd_path_base[COMPAT_MAX_PATH];
 extern MessageList gProtoMessageList;
 extern char* _proto_none_str;
 
+void _proto_make_path(char* path, int pid);
 int _proto_list_str(int pid, char* proto_path);
 bool _proto_action_can_use(int pid);
 bool _proto_action_can_use_on(int pid);
@@ -122,5 +125,12 @@ int _proto_save_pid(int pid);
 void _proto_remove_all();
 int protoGetProto(int pid, Proto** out_proto);
 int _ResetPlayer();
+
+static bool isExitGridPid(int pid)
+{
+    return pid >= FIRST_EXIT_GRID_PID && pid <= LAST_EXIT_GRID_PID;
+}
+
+} // namespace fallout
 
 #endif /* PROTO_H */

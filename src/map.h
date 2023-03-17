@@ -4,9 +4,12 @@
 #include "combat_defs.h"
 #include "db.h"
 #include "geometry.h"
+#include "interpreter.h"
 #include "map_defs.h"
 #include "message.h"
 #include "platform_compat.h"
+
+namespace fallout {
 
 #define ORIGINAL_ISO_WINDOW_WIDTH 640
 #define ORIGINAL_ISO_WINDOW_HEIGHT 380
@@ -49,7 +52,9 @@ typedef struct MapHeader {
 
     // map_number
     int field_34;
-    int field_38;
+
+    // Time in game ticks when PC last visited this map.
+    int lastVisitTime;
     int field_3C[44];
 } MapHeader;
 
@@ -81,10 +86,10 @@ void isoEnable();
 bool isoDisable();
 bool isoIsDisabled();
 int mapSetElevation(int elevation);
-int mapSetGlobalVar(int var, int value);
-int mapGetGlobalVar(int var);
-int mapSetLocalVar(int var, int value);
-int mapGetLocalVar(int var);
+int mapSetGlobalVar(int var, ProgramValue& value);
+int mapGetGlobalVar(int var, ProgramValue& value);
+int mapSetLocalVar(int var, ProgramValue& value);
+int mapGetLocalVar(int var, ProgramValue& value);
 int _map_malloc_local_var(int a1);
 void mapSetStart(int a1, int a2, int a3);
 char* mapGetName(int map_num, int elev);
@@ -95,7 +100,7 @@ char* _map_get_description_idx_(int map_index);
 int mapGetCurrentMap();
 int mapScroll(int dx, int dy);
 int mapSetEnteringLocation(int a1, int a2, int a3);
-void _map_new_map();
+void mapNewMap();
 int mapLoadByName(char* fileName);
 int mapLoadById(int map_index);
 int mapLoadSaved(char* fileName);
@@ -103,5 +108,7 @@ int _map_target_load_area();
 int mapSetTransition(MapTransition* transition);
 int mapHandleTransition();
 int _map_save_in_game(bool a1);
+
+} // namespace fallout
 
 #endif /* MAP_H */

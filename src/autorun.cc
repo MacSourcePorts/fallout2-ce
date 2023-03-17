@@ -1,8 +1,6 @@
 #include "autorun.h"
 
 #ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <windows.h>
 #endif
 
@@ -10,6 +8,8 @@
 // 0x530010
 static HANDLE gInterplayGenericAutorunMutex;
 #endif
+
+namespace fallout {
 
 // 0x4139C0
 bool autorunMutexCreate()
@@ -34,3 +34,5 @@ void autorunMutexClose()
     }
 #endif
 }
+
+} // namespace fallout

@@ -1,10 +1,13 @@
 #ifndef DFILE_H
 #define DFILE_H
 
+#include <stdio.h>
+
+#include <zlib.h>
+
 #include "platform_compat.h"
 
-#include <stdio.h>
-#include <zlib.h>
+namespace fallout {
 
 typedef struct DBase DBase;
 typedef struct DBaseEntry DBaseEntry;
@@ -126,5 +129,7 @@ int dfileSeek(DFile* stream, long offset, int origin);
 long dfileTell(DFile* stream);
 void dfileRewind(DFile* stream);
 int dfileEof(DFile* stream);
+
+} // namespace fallout
 
 #endif /* DFILE_H */

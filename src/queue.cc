@@ -15,6 +15,8 @@
 #include "proto_instance.h"
 #include "scripts.h"
 
+namespace fallout {
+
 typedef struct QueueListNode {
     // TODO: Make unsigned.
     int time;
@@ -256,7 +258,7 @@ int queueAddEvent(int delay, Object* obj, void* data, int eventType)
     newQueueListNode->data = data;
 
     if (obj != NULL) {
-        obj->flags |= OBJECT_USED;
+        obj->flags |= OBJECT_QUEUED;
     }
 
     QueueListNode** v3 = &gQueueListHead;
@@ -422,6 +424,11 @@ void _queue_clear_type(int eventType, QueueEventHandler* fn)
                 }
 
                 internal_free(tmp);
+
+                // SFALL: Re-read next event since `fn` handler can change it.
+                // This fixes crash when leaving the map while waiting for
+                // someone to die of a super stimpak overdose.
+                curr = *ptr;
             }
         } else {
             ptr = &(curr->next);
@@ -478,15 +485,9 @@ static int _queue_do_explosion_(Object* explosive, bool a2)
 
     int maxDamage;
     int minDamage;
-    if (explosive->pid == PROTO_ID_DYNAMITE_I || explosive->pid == PROTO_ID_DYNAMITE_II) {
-        // Dynamite
-        minDamage = 30;
-        maxDamage = 50;
-    } else {
-        // Plastic explosive
-        minDamage = 40;
-        maxDamage = 80;
-    }
+
+    // SFALL
+    explosiveGetDamage(explosive->pid, &minDamage, &maxDamage);
 
     // FIXME: I guess this is a little bit wrong, dude can never be null, I
     // guess it needs to check if owner is dude.
@@ -571,3 +572,5 @@ void* queueFindNextEvent(Object* owner, int eventType)
 
     return NULL;
 }
+
+} // namespace fallout

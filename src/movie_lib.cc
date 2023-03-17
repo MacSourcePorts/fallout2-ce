@@ -4,12 +4,14 @@
 
 #include "movie_lib.h"
 
-#include "audio_engine.h"
-#include "platform_compat.h"
-
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "audio_engine.h"
+#include "platform_compat.h"
+
+namespace fallout {
 
 typedef struct STRUCT_6B3690 {
     void* field_0;
@@ -715,11 +717,7 @@ static void* _ioRead(int size)
         return NULL;
     }
 
-    if (!gMovieLibReadProc(_io_handle, buf, size)) {
-        return NULL;
-    }
-
-    return buf;
+    return gMovieLibReadProc(_io_handle, buf, size) < 1 ? NULL : buf;
 }
 
 // 0x4F4D40
@@ -1869,7 +1867,7 @@ static void _nfPkDecomp(unsigned char* a1, unsigned char* a2, int a3, int a4, in
     int v7;
     int i;
     int j;
-    int v10;
+    ptrdiff_t v10;
     int v11;
     int v13;
     int byte;
@@ -2795,3 +2793,5 @@ static void _nfPkDecomp(unsigned char* a1, unsigned char* a2, int a3, int a4, in
         dest += var_8;
     }
 }
+
+} // namespace fallout

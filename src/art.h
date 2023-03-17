@@ -8,6 +8,8 @@
 #include "platform_compat.h"
 #include "proto_types.h"
 
+namespace fallout {
+
 typedef enum Head {
     HEAD_INVALID,
     HEAD_MARCUS,
@@ -65,7 +67,6 @@ typedef enum Background {
     BACKGROUND_COUNT,
 } Background;
 
-#pragma pack(2)
 typedef struct Art {
     int field_0;
     short framesPerSecond;
@@ -74,9 +75,9 @@ typedef struct Art {
     short xOffsets[6];
     short yOffsets[6];
     int dataOffsets[6];
-    int field_3A;
+    int padding[6];
+    int dataSize;
 } Art;
-#pragma pack()
 
 typedef struct ArtFrame {
     short width;
@@ -127,7 +128,7 @@ unsigned char* artLockFrameData(int fid, int frame, int direction, CacheEntry** 
 unsigned char* artLockFrameDataReturningSize(int fid, CacheEntry** out_cache_entry, int* widthPtr, int* heightPtr);
 int artUnlock(CacheEntry* cache_entry);
 int artCacheFlush();
-int artCopyFileName(int a1, int a2, char* a3);
+int artCopyFileName(int objectType, int a2, char* a3);
 int _art_get_code(int a1, int a2, char* a3, char* a4);
 char* artBuildFilePath(int a1);
 int artGetFramesPerSecond(Art* art);
@@ -144,8 +145,32 @@ bool artExists(int fid);
 bool _art_fid_valid(int fid);
 int _art_alias_num(int a1);
 int artCritterFidShouldRun(int a1);
-int _art_alias_fid(int a1);
-int buildFid(int a1, int a2, int a3, int a4, int a5);
+int artAliasFid(int fid);
+int buildFid(int objectType, int frmId, int animType, int a4, int rotation);
+Art* artLoad(const char* path);
 int artRead(const char* path, unsigned char* data);
+int artWrite(const char* path, unsigned char* data);
+
+class FrmImage {
+public:
+    FrmImage();
+    ~FrmImage();
+
+    bool isLocked() const { return _key != nullptr; }
+    bool lock(unsigned int fid);
+    void unlock();
+
+    int getWidth() const { return _width; }
+    int getHeight() const { return _height; }
+    unsigned char* getData() const { return _data; }
+
+private:
+    CacheEntry* _key;
+    unsigned char* _data;
+    int _width;
+    int _height;
+};
+
+} // namespace fallout
 
 #endif

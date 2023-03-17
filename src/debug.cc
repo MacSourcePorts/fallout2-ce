@@ -1,25 +1,25 @@
 #include "debug.h"
 
-#include "memory.h"
-#include "platform_compat.h"
-#include "window_manager_private.h"
-
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
+#include <SDL.h>
+
+#include "memory.h"
+#include "platform_compat.h"
+#include "window_manager_private.h"
+
+namespace fallout {
 
 static int _debug_puts(char* string);
 static void _debug_clear();
 static int _debug_mono(char* string);
 static int _debug_log(char* string);
 static int _debug_screen(char* string);
-static void _debug_putc(char ch);
+static void _debug_putc(int ch);
+static void _debug_scroll();
 
 // 0x51DEF8
 static FILE* _fd = NULL;
@@ -140,18 +140,12 @@ int debugPrint(const char* format, ...)
 
     if (gDebugPrintProc != NULL) {
         char string[260];
-        vsprintf(string, format, args);
+        vsnprintf(string, sizeof(string), format, args);
 
         rc = gDebugPrintProc(string);
     } else {
 #ifdef _DEBUG
-        char string[260];
-        vsprintf(string, format, args);
-#ifdef _WIN32
-        OutputDebugStringA(string);
-#else
-        printf("%s", string);
-#endif
+        SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_INFO, format, args);
 #endif
         rc = -1;
     }
@@ -174,7 +168,28 @@ static int _debug_puts(char* string)
 // 0x4C6FAC
 static void _debug_clear()
 {
-    // TODO: Something with segments.
+    char* buffer;
+    int x;
+    int y;
+
+    buffer = NULL;
+
+    if (gDebugPrintProc == _debug_mono) {
+        buffer = (char*)0xB0000;
+    } else if (gDebugPrintProc == _debug_screen) {
+        buffer = (char*)0xB8000;
+    }
+
+    if (buffer != NULL) {
+        for (y = 0; y < 25; y++) {
+            for (x = 0; x < 80; x++) {
+                *buffer++ = ' ';
+                *buffer++ = 7;
+            }
+        }
+        _cury = 0;
+        _curx = 0;
+    }
 }
 
 // 0x4C7004
@@ -220,15 +235,72 @@ static int _debug_screen(char* string)
 }
 
 // 0x4C709C
-static void _debug_putc(char ch)
+static void _debug_putc(int ch)
 {
-    // TODO: Something with segments.
+    char* buffer;
+
+    buffer = (char*)0xB0000;
+
+    switch (ch) {
+    case 7:
+        printf("\x07");
+        return;
+    case 8:
+        if (_curx > 0) {
+            _curx--;
+            buffer += 2 * _curx + 2 * 80 * _cury;
+            *buffer++ = ' ';
+            *buffer = 7;
+        }
+        return;
+    case 9:
+        do {
+            _debug_putc(' ');
+        } while ((_curx - 1) % 4 != 0);
+        return;
+    case 13:
+        _curx = 0;
+        return;
+    default:
+        buffer += 2 * _curx + 2 * 80 * _cury;
+        *buffer++ = ch;
+        *buffer = 7;
+        _curx++;
+        if (_curx < 80) {
+            return;
+        }
+        // FALLTHROUGH
+    case 10:
+        _curx = 0;
+        _cury++;
+        if (_cury > 24) {
+            _cury = 24;
+            _debug_scroll();
+        }
+        return;
+    }
 }
 
 // 0x4C71AC
-void _debug_scroll()
+static void _debug_scroll()
 {
-    // TODO: Something with segments.
+    char* buffer;
+    int x;
+    int y;
+
+    buffer = (char*)0xB0000;
+
+    for (y = 0; y < 24; y++) {
+        for (x = 0; x < 80 * 2; x++) {
+            buffer[0] = buffer[80 * 2];
+            buffer++;
+        }
+    }
+
+    for (x = 0; x < 80; x++) {
+        *buffer++ = ' ';
+        *buffer++ = 7;
+    }
 }
 
 // 0x4C71E8
@@ -238,3 +310,5 @@ void _debug_exit(void)
         fclose(_fd);
     }
 }
+
+} // namespace fallout

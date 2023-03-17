@@ -1,11 +1,16 @@
 #include "random.h"
 
+#include <limits.h>
+#include <stdlib.h>
+
+#include <random>
+
 #include "debug.h"
 #include "platform_compat.h"
 #include "scripts.h"
+#include "sfall_config.h"
 
-#include <limits.h>
-#include <stdlib.h>
+namespace fallout {
 
 static int _roll_reset_();
 static int randomTranslateRoll(int delta, int criticalSuccessModifier);
@@ -34,7 +39,7 @@ static int _idum;
 void randomInit()
 {
     unsigned int randomSeed = randomGetSeed();
-    srand(randomSeed);
+    std::srand(randomSeed);
 
     int pseudorandomSeed = randomInt32();
     randomSeedPrerandomInternal(pseudorandomSeed);
@@ -97,11 +102,15 @@ static int randomTranslateRoll(int delta, int criticalSuccessModifier)
 {
     int gameTime = gameTimeGetTime();
 
+    // SFALL: Remove criticals time limits.
+    bool criticalsTimeLimitsRemoved = false;
+    configGetBool(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_REMOVE_CRITICALS_TIME_LIMITS_KEY, &criticalsTimeLimitsRemoved);
+
     int roll;
     if (delta < 0) {
         roll = ROLL_FAILURE;
 
-        if ((gameTime / GAME_TIME_TICKS_PER_DAY) >= 1) {
+        if (criticalsTimeLimitsRemoved || (gameTime / GAME_TIME_TICKS_PER_DAY) >= 1) {
             // 10% to become critical failure.
             if (randomBetween(1, 100) <= -delta / 10) {
                 roll = ROLL_CRITICAL_FAILURE;
@@ -110,7 +119,7 @@ static int randomTranslateRoll(int delta, int criticalSuccessModifier)
     } else {
         roll = ROLL_SUCCESS;
 
-        if ((gameTime / GAME_TIME_TICKS_PER_DAY) >= 1) {
+        if (criticalsTimeLimitsRemoved || (gameTime / GAME_TIME_TICKS_PER_DAY) >= 1) {
             // 10% + modifier to become critical success.
             if (randomBetween(1, 100) <= delta / 10 + criticalSuccessModifier) {
                 roll = ROLL_CRITICAL_SUCCESS;
@@ -176,10 +185,7 @@ void randomSeedPrerandom(int seed)
 // 0x4A31C4
 static int randomInt32()
 {
-    int high = rand() << 16;
-    int low = rand();
-
-    return (high + low) & INT_MAX;
+    return std::rand();
 }
 
 // 0x4A31E0
@@ -247,3 +253,5 @@ static void randomValidatePrerandom()
         debugPrint("Warning! Sequence is not random, 95%% confidence.\n");
     }
 }
+
+} // namespace fallout

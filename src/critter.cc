@@ -1,5 +1,8 @@
 #include "critter.h"
 
+#include <stdio.h>
+#include <string.h>
+
 #include "animation.h"
 #include "art.h"
 #include "character_editor.h"
@@ -26,10 +29,9 @@
 #include "stat.h"
 #include "tile.h"
 #include "trait.h"
-#include "world_map.h"
+#include "worldmap.h"
 
-#include <stdio.h>
-#include <string.h>
+namespace fallout {
 
 // Maximum length of dude's name length.
 #define DUDE_NAME_MAX_LENGTH (32)
@@ -68,6 +70,7 @@ typedef enum RadiationLevel {
 } RadiationLevel;
 
 static int _get_rad_damage_level(Object* obj, void* data);
+static int critter_kill_count_clear();
 static int _critterClearObjDrugs(Object* obj, void* data);
 
 // 0x50141C
@@ -159,7 +162,8 @@ int critterInit()
 {
     dudeResetName();
 
-    memset(gKillsByType, 0, sizeof(gKillsByType));
+    // NOTE: Uninline;
+    critter_kill_count_clear();
 
     if (!messageListInit(&gCritterMessageList)) {
         debugPrint("\nError: Initing critter name message file!");
@@ -167,12 +171,14 @@ int critterInit()
     }
 
     char path[COMPAT_MAX_PATH];
-    sprintf(path, "%sscrname.msg", asc_5186C8);
+    snprintf(path, sizeof(path), "%sscrname.msg", asc_5186C8);
 
     if (!messageListLoad(&gCritterMessageList, path)) {
         debugPrint("\nError: Loading critter name message file!");
         return -1;
     }
+
+    messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_SCRNAME, &gCritterMessageList);
 
     return 0;
 }
@@ -181,12 +187,15 @@ int critterInit()
 void critterReset()
 {
     dudeResetName();
-    memset(gKillsByType, 0, sizeof(gKillsByType));
+
+    // NOTE: Uninline;
+    critter_kill_count_clear();
 }
 
 // 0x42D004
 void critterExit()
 {
+    messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_SCRNAME, nullptr);
     messageListFree(&gCritterMessageList);
 }
 
@@ -276,18 +285,18 @@ void dudeResetName()
 // 0x42D18C
 int critterGetHitPoints(Object* critter)
 {
-    return (critter->pid >> 24) == OBJ_TYPE_CRITTER ? critter->data.critter.hp : 0;
+    return PID_TYPE(critter->pid) == OBJ_TYPE_CRITTER ? critter->data.critter.hp : 0;
 }
 
 // 0x42D1A4
-int critterAdjustHitPoints(Object* critter, int a2)
+int critterAdjustHitPoints(Object* critter, int hp)
 {
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
     int maximumHp = critterGetStat(critter, STAT_MAXIMUM_HIT_POINTS);
-    int newHp = critter->data.critter.hp + a2;
+    int newHp = critter->data.critter.hp + hp;
 
     critter->data.critter.hp = newHp;
     if (maximumHp >= newHp) {
@@ -304,7 +313,7 @@ int critterAdjustHitPoints(Object* critter, int a2)
 // 0x42D1F8
 int critterGetPoison(Object* critter)
 {
-    return (critter->pid >> 24) == OBJ_TYPE_CRITTER ? critter->data.critter.poison : 0;
+    return PID_TYPE(critter->pid) == OBJ_TYPE_CRITTER ? critter->data.critter.poison : 0;
 }
 
 // Adjust critter's current poison by specified amount.
@@ -396,7 +405,7 @@ int poisonEventProcess(Object* obj, void* data)
 // 0x42D38C
 int critterGetRadiation(Object* obj)
 {
-    return (obj->pid >> 24) == OBJ_TYPE_CRITTER ? obj->data.critter.radiation : 0;
+    return PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER ? obj->data.critter.radiation : 0;
 }
 
 // 0x42D3A4
@@ -416,7 +425,7 @@ int critterAdjustRadiation(Object* obj, int amount)
     }
 
     if (amount > 0) {
-        proto->critter.data.flags |= 0x02;
+        proto->critter.data.flags |= CRITTER_RADIATED;
     }
 
     if (amount > 0) {
@@ -483,7 +492,7 @@ int _critter_check_rads(Object* obj)
 
     Proto* proto;
     protoGetProto(obj->pid, &proto);
-    if ((proto->critter.data.flags & 0x02) == 0) {
+    if ((proto->critter.data.flags & CRITTER_RADIATED) == 0) {
         return 0;
     }
 
@@ -521,10 +530,10 @@ int _critter_check_rads(Object* obj)
 
         radiationEvent->radiationLevel = radiationLevel;
         radiationEvent->isHealing = 0;
-        queueAddEvent(36000 * randomBetween(4, 18), obj, radiationEvent, EVENT_TYPE_RADIATION);
+        queueAddEvent(GAME_TIME_TICKS_PER_HOUR * randomBetween(4, 18), obj, radiationEvent, EVENT_TYPE_RADIATION);
     }
 
-    proto->critter.data.flags &= ~(0x02);
+    proto->critter.data.flags &= ~CRITTER_RADIATED;
 
     return 0;
 }
@@ -568,6 +577,13 @@ void _process_rads(Object* obj, int radiationLevel, bool isHealing)
     if (obj == gDude) {
         // Radiation level message, higher is worse.
         messageListItem.num = 1000 + radiationLevelIndex;
+
+        // SFALL: Fix radiation message when removing radiation effects.
+        if (isHealing) {
+            // You feel better.
+            messageListItem.num = 3003;
+        }
+
         if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
             displayMonitorAddMessage(messageListItem.text);
         }
@@ -579,15 +595,18 @@ void _process_rads(Object* obj, int radiationLevel, bool isHealing)
         critterSetBonusStat(obj, gRadiationEffectStats[effect], value);
     }
 
-    if ((obj->data.critter.combat.results & DAM_DEAD) == 0) {
-        // Loop thru effects affecting primary stats. If any of the primary stat
-        // dropped below minimal value, kill it.
-        for (int effect = 0; effect < RADIATION_EFFECT_PRIMARY_STAT_COUNT; effect++) {
-            int base = critterGetBaseStatWithTraitModifier(obj, gRadiationEffectStats[effect]);
-            int bonus = critterGetBonusStat(obj, gRadiationEffectStats[effect]);
-            if (base + bonus < PRIMARY_STAT_MIN) {
-                critterKill(obj, -1, 1);
-                break;
+    // SFALL: Prevent death when removing radiation effects.
+    if (!isHealing) {
+        if ((obj->data.critter.combat.results & DAM_DEAD) == 0) {
+            // Loop thru effects affecting primary stats. If any of the primary stat
+            // dropped below minimal value, kill it.
+            for (int effect = 0; effect < RADIATION_EFFECT_PRIMARY_STAT_COUNT; effect++) {
+                int base = critterGetBaseStatWithTraitModifier(obj, gRadiationEffectStats[effect]);
+                int bonus = critterGetBonusStat(obj, gRadiationEffectStats[effect]);
+                if (base + bonus < PRIMARY_STAT_MIN) {
+                    critterKill(obj, -1, 1);
+                    break;
+                }
             }
         }
     }
@@ -597,7 +616,8 @@ void _process_rads(Object* obj, int radiationLevel, bool isHealing)
             // You have died from radiation sickness.
             messageListItem.num = 1006;
             if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                // SFALL: Display a pop-up message box about death from radiation.
+                gameShowDeathDialog(messageListItem.text);
             }
         }
     }
@@ -657,7 +677,7 @@ int radiationEventWrite(File* stream, void* data)
 // 0x42D82C
 int critterGetDamageType(Object* obj)
 {
-    if ((obj->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
@@ -667,6 +687,15 @@ int critterGetDamageType(Object* obj)
     }
 
     return proto->critter.data.damageType;
+}
+
+// NOTE: Inlined.
+//
+// 0x42D860
+static int critter_kill_count_clear()
+{
+    memset(gKillsByType, 0, sizeof(gKillsByType));
+    return 0;
 }
 
 // 0x42D878
@@ -723,7 +752,7 @@ int critterGetKillType(Object* obj)
         return KILL_TYPE_MAN;
     }
 
-    if ((obj->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER) {
         return -1;
     }
 
@@ -766,7 +795,7 @@ char* killTypeGetDescription(int killType)
 // 0x42D9F4
 int _critter_heal_hours(Object* critter, int a2)
 {
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return -1;
     }
 
@@ -788,7 +817,7 @@ static int _critterClearObjDrugs(Object* obj, void* data)
 // 0x42DA64
 void critterKill(Object* critter, int anim, bool a3)
 {
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return;
     }
 
@@ -800,20 +829,20 @@ void critterKill(Object* critter, int anim, bool a3)
     bool shouldChangeFid = false;
     int fid;
     if (_critter_is_prone(critter)) {
-        int current = (critter->fid & 0xFF0000) >> 16;
+        int current = FID_ANIM_TYPE(critter->fid);
         if (current == ANIM_FALL_BACK || current == ANIM_FALL_FRONT) {
             bool back = false;
             if (current == ANIM_FALL_BACK) {
                 back = true;
             } else {
-                fid = buildFid(1, critter->fid & 0xFFF, ANIM_FALL_FRONT_SF, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
+                fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_FALL_FRONT_SF, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
                 if (!artExists(fid)) {
                     back = true;
                 }
             }
 
             if (back) {
-                fid = buildFid(1, critter->fid & 0xFFF, ANIM_FALL_BACK_SF, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
+                fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_FALL_BACK_SF, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
             }
 
             shouldChangeFid = true;
@@ -828,12 +857,12 @@ void critterKill(Object* critter, int anim, bool a3)
             anim = LAST_SF_DEATH_ANIM;
         }
 
-        fid = buildFid(1, critter->fid & 0xFFF, anim, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
+        fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, anim, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
         _obj_fix_violence_settings(&fid);
         if (!artExists(fid)) {
             debugPrint("\nError: Critter Kill: Can't match fid!");
 
-            fid = buildFid(1, critter->fid & 0xFFF, ANIM_FALL_BACK_BLOOD_SF, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
+            fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_FALL_BACK_BLOOD_SF, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
             _obj_fix_violence_settings(&fid);
         }
 
@@ -850,7 +879,7 @@ void critterKill(Object* critter, int anim, bool a3)
         rectUnion(&updatedRect, &tempRect, &updatedRect);
     }
 
-    if (!_critter_flag_check(critter->pid, 2048)) {
+    if (!_critter_flag_check(critter->pid, CRITTER_FLAT)) {
         critter->flags |= OBJECT_NO_BLOCK;
         _obj_toggle_flat(critter, &tempRect);
     }
@@ -873,7 +902,7 @@ void critterKill(Object* critter, int anim, bool a3)
     _critterClearObj = critter;
     _queue_clear_type(EVENT_TYPE_DRUG, _critterClearObjDrugs);
 
-    _item_destroy_all_hidden(critter);
+    itemDestroyAllHidden(critter);
 
     if (a3) {
         tileWindowRefreshRect(&updatedRect, elevation);
@@ -902,7 +931,7 @@ bool critterIsActive(Object* critter)
         return false;
     }
 
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return false;
     }
 
@@ -924,7 +953,7 @@ bool critterIsDead(Object* critter)
         return false;
     }
 
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return false;
     }
 
@@ -946,7 +975,7 @@ bool critterIsCrippled(Object* critter)
         return false;
     }
 
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return false;
     }
 
@@ -960,15 +989,15 @@ bool _critter_is_prone(Object* critter)
         return false;
     }
 
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return false;
     }
 
-    int anim = (critter->fid & 0xFF0000) >> 16;
+    int anim = FID_ANIM_TYPE(critter->fid);
 
     return (critter->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN)) != 0
-        || anim >= FIRST_KNOCKDOWN_AND_DEATH_ANIM && anim <= LAST_KNOCKDOWN_AND_DEATH_ANIM
-        || anim >= FIRST_SF_DEATH_ANIM && anim <= LAST_SF_DEATH_ANIM;
+    || (anim >= FIRST_KNOCKDOWN_AND_DEATH_ANIM && anim <= LAST_KNOCKDOWN_AND_DEATH_ANIM)
+    || (anim >= FIRST_SF_DEATH_ANIM && anim <= LAST_SF_DEATH_ANIM);
 }
 
 // critter_body_type
@@ -980,7 +1009,7 @@ int critterGetBodyType(Object* critter)
         return 0;
     }
 
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
@@ -1225,7 +1254,7 @@ int knockoutEventProcess(Object* obj, void* data)
     obj->data.critter.combat.results |= DAM_KNOCKED_DOWN;
 
     if (isInCombat()) {
-        obj->data.critter.combat.maneuver |= CRITTER_MANEUVER_0x01;
+        obj->data.critter.combat.maneuver |= CRITTER_MANEUVER_ENGAGING;
     } else {
         _dude_standup(obj);
     }
@@ -1236,7 +1265,7 @@ int knockoutEventProcess(Object* obj, void* data)
 // 0x42E460
 int _critter_wake_clear(Object* obj, void* data)
 {
-    if ((obj->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
@@ -1246,7 +1275,7 @@ int _critter_wake_clear(Object* obj, void* data)
 
     obj->data.critter.combat.results &= ~(DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN);
 
-    int fid = buildFid((obj->fid & 0xF000000) >> 24, obj->fid & 0xFFF, ANIM_STAND, (obj->fid & 0xF000) >> 12, obj->rotation + 1);
+    int fid = buildFid(FID_TYPE(obj->fid), obj->fid & 0xFFF, ANIM_STAND, (obj->fid & 0xF000) >> 12, obj->rotation + 1);
     objectSetFid(obj, fid, 0);
 
     return 0;
@@ -1259,12 +1288,12 @@ int _critter_set_who_hit_me(Object* a1, Object* a2)
         return -1;
     }
 
-    if (a2 != NULL && ((a2->fid & 0xF000000) >> 24) != OBJ_TYPE_CRITTER) {
+    if (a2 != NULL && FID_TYPE(a2->fid) != OBJ_TYPE_CRITTER) {
         return -1;
     }
 
-    if ((a1->pid >> 24) == OBJ_TYPE_CRITTER) {
-        if (a2 == NULL || a1->data.critter.combat.team != a2->data.critter.combat.team || statRoll(a1, STAT_INTELLIGENCE, -1, NULL) < 2 && (!objectIsPartyMember(a1) || !objectIsPartyMember(a2))) {
+    if (PID_TYPE(a1->pid) == OBJ_TYPE_CRITTER) {
+        if (a2 == NULL || a1->data.critter.combat.team != a2->data.critter.combat.team || (statRoll(a1, STAT_INTELLIGENCE, -1, NULL) < 2 && (!objectIsPartyMember(a1) || !objectIsPartyMember(a2)))) {
             a1->data.critter.combat.whoHitMe = a2;
             if (a2 == gDude) {
                 reactionSetValue(a1, -3);
@@ -1279,7 +1308,7 @@ int _critter_set_who_hit_me(Object* a1, Object* a2)
 bool _critter_can_obj_dude_rest()
 {
     bool v1 = false;
-    if (!_wmMapCanRestHere(gElevation)) {
+    if (!wmMapCanRestHere(gElevation)) {
         v1 = true;
     }
 
@@ -1319,7 +1348,7 @@ bool _critter_can_obj_dude_rest()
 // 0x42E62C
 int critterGetMovementPointCostAdjustedForCrippledLegs(Object* critter, int actionPoints)
 {
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
@@ -1358,7 +1387,7 @@ bool _critter_flag_check(int pid, int flag)
         return false;
     }
 
-    if ((pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(pid) != OBJ_TYPE_CRITTER) {
         return false;
     }
 
@@ -1366,3 +1395,5 @@ bool _critter_flag_check(int pid, int flag)
     protoGetProto(pid, &proto);
     return (proto->critter.data.flags & flag) != 0;
 }
+
+} // namespace fallout

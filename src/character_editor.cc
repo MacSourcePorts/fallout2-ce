@@ -1,8 +1,16 @@
 #include "character_editor.h"
 
+#include <assert.h>
+#include <ctype.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <algorithm>
+#include <vector>
+
 #include "art.h"
 #include "color.h"
-#include "core.h"
+#include "combat.h"
 #include "critter.h"
 #include "cycle.h"
 #include "db.h"
@@ -11,14 +19,17 @@
 #include "draw.h"
 #include "game.h"
 #include "game_mouse.h"
-#include "game_palette.h"
 #include "game_sound.h"
 #include "geometry.h"
+#include "graph_lib.h"
+#include "input.h"
 #include "interface.h"
 #include "item.h"
+#include "kb.h"
 #include "map.h"
 #include "memory.h"
 #include "message.h"
+#include "mouse.h"
 #include "object.h"
 #include "palette.h"
 #include "perk.h"
@@ -28,18 +39,14 @@
 #include "sfall_config.h"
 #include "skill.h"
 #include "stat.h"
+#include "svga.h"
 #include "text_font.h"
 #include "trait.h"
 #include "window_manager.h"
 #include "word_wrap.h"
-#include "world_map.h"
+#include "worldmap.h"
 
-#include <assert.h>
-#include <ctype.h>
-#include <stdio.h>
-#include <string.h>
-
-#include <vector>
+namespace fallout {
 
 #define RENDER_ALL_STATS 7
 
@@ -291,6 +298,9 @@ static int genericReputationCompare(const void* a1, const void* a2);
 static void customKarmaFolderInit();
 static void customKarmaFolderFree();
 static int customKarmaFolderGetFrmId();
+
+static void customTownReputationInit();
+static void customTownReputationFree();
 
 // 0x431C40
 static int gCharacterEditorFrmIds[EDITOR_GRAPHIC_COUNT] = {
@@ -591,17 +601,8 @@ static int gCharacterEditorTagSkillBtns[SKILL_COUNT];
 // 0x5701A0
 static char gCharacterEditorNameBackup[32];
 
-// 0x5701C0
-static Size gCharacterEditorFrmSize[EDITOR_GRAPHIC_COUNT];
-
-// 0x570350
-static CacheEntry* gCharacterEditorFrmHandle[EDITOR_GRAPHIC_COUNT];
-
 // 0x570418
 static unsigned char* gCharacterEditorFrmCopy[EDITOR_GRAPHIC_COUNT];
-
-// 0x5704E0
-static unsigned char* gCharacterEditorFrmData[EDITOR_GRAPHIC_COUNT];
 
 // 0x5705A8
 static int gCharacterEditorFolderViewMaxLines;
@@ -642,9 +643,6 @@ static int gCharacterEditorKillsFolderTopLine;
 // 0x5705D8
 static int gCharacterEditorPerkFolderTopLine;
 
-// 0x5705DC
-static unsigned char* gPerkDialogBackgroundBuffer;
-
 // 0x5705E0
 static int gPerkDialogWindow;
 
@@ -676,9 +674,6 @@ static unsigned char* gPerkDialogWindowBuffer;
 // 0x570630
 static CritterProtoData gCharacterEditorDudeDataBackup;
 
-// 0x5707A4
-static unsigned char* gCharacterEditorWindowBackgroundBuffer;
-
 // 0x5707A8
 static int gPerkDialogCurrentLine;
 
@@ -698,11 +693,6 @@ static int gCharacterEditorOldFont;
 
 // 0x5707BC
 static int gCharacterEditorKillsCount;
-
-// character editor background
-//
-// 0x5707C0
-static CacheEntry* gCharacterEditorWindowBackgroundHandle;
 
 // current hit points
 //
@@ -786,16 +776,23 @@ static unsigned char gCharacterEditorHasFreePerk;
 // 0x570A2A
 static unsigned char gCharacterEditorIsSkillsFirstDraw;
 
+static FrmImage _editorBackgroundFrmImage;
+static FrmImage _editorFrmImages[EDITOR_GRAPHIC_COUNT];
+static FrmImage _perkDialogBackgroundFrmImage;
+
 struct CustomKarmaFolderDescription {
     int frmId;
     int threshold;
 };
 
 static std::vector<CustomKarmaFolderDescription> gCustomKarmaFolderDescriptions;
+static std::vector<TownReputationEntry> gCustomTownReputationEntries;
 
 // 0x431DF8
 int characterEditorShow(bool isCreationMode)
 {
+    ScopedGameMode gm(!isCreationMode ? GameMode::kEditor : 0);
+
     char* messageListItemText;
     char line1[128];
     char line2[128];
@@ -823,8 +820,12 @@ int characterEditorShow(bool isCreationMode)
 
     int rc = -1;
     while (rc == -1) {
-        _frame_time = _get_time();
-        int keyCode = _get_input();
+        sharedFpsLimiter.mark();
+
+        _frame_time = getTicks();
+        int keyCode = inputGetInput();
+
+        convertMouseWheelToArrowKey(&keyCode);
 
         bool done = false;
         if (keyCode == 500) {
@@ -1170,6 +1171,9 @@ int characterEditorShow(bool isCreationMode)
                 }
             }
         }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
     }
 
     if (rc == 0) {
@@ -1185,8 +1189,8 @@ int characterEditorShow(bool isCreationMode)
         characterEditorRestorePlayer();
     }
 
-    if (dudeHasState(0x03)) {
-        dudeDisableState(0x03);
+    if (dudeHasState(DUDE_STATE_LEVEL_UP_AVAILABLE)) {
+        dudeDisableState(DUDE_STATE_LEVEL_UP_AVAILABLE);
     }
 
     interfaceRenderHitPoints(false);
@@ -1269,15 +1273,14 @@ static int characterEditorWindowInit()
         return -1;
     }
 
-    sprintf(path, "%s%s", asc_5186C8, "editor.msg");
+    snprintf(path, sizeof(path), "%s%s", asc_5186C8, "editor.msg");
 
     if (!messageListLoad(&gCharacterEditorMessageList, path)) {
         return -1;
     }
 
-    fid = buildFid(6, (gCharacterEditorIsCreationMode ? 169 : 177), 0, 0, 0);
-    gCharacterEditorWindowBackgroundBuffer = artLockFrameDataReturningSize(fid, &gCharacterEditorWindowBackgroundHandle, &(gCharacterEditorFrmSize[0].width), &(gCharacterEditorFrmSize[0].height));
-    if (gCharacterEditorWindowBackgroundBuffer == NULL) {
+    fid = buildFid(OBJ_TYPE_INTERFACE, (gCharacterEditorIsCreationMode ? 169 : 177), 0, 0, 0);
+    if (!_editorBackgroundFrmImage.lock(fid)) {
         messageListFree(&gCharacterEditorMessageList);
         return -1;
     }
@@ -1293,23 +1296,25 @@ static int characterEditorWindowInit()
     // SFALL: Custom karma folder.
     customKarmaFolderInit();
 
+    // SFALL: Custom town reputation.
+    customTownReputationInit();
+
     soundContinueAll();
 
     for (i = 0; i < EDITOR_GRAPHIC_COUNT; i++) {
-        fid = buildFid(6, gCharacterEditorFrmIds[i], 0, 0, 0);
-        gCharacterEditorFrmData[i] = artLockFrameDataReturningSize(fid, &(gCharacterEditorFrmHandle[i]), &(gCharacterEditorFrmSize[i].width), &(gCharacterEditorFrmSize[i].height));
-        if (gCharacterEditorFrmData[i] == NULL) {
+        fid = buildFid(OBJ_TYPE_INTERFACE, gCharacterEditorFrmIds[i], 0, 0, 0);
+        if (!_editorFrmImages[i].lock(fid)) {
             break;
         }
     }
 
     if (i != EDITOR_GRAPHIC_COUNT) {
         while (--i >= 0) {
-            artUnlock(gCharacterEditorFrmHandle[i]);
+            _editorFrmImages[i].unlock();
         }
         return -1;
 
-        artUnlock(gCharacterEditorWindowBackgroundHandle);
+        _editorBackgroundFrmImage.unlock();
 
         messageListFree(&gCharacterEditorMessageList);
 
@@ -1326,11 +1331,11 @@ static int characterEditorWindowInit()
 
     for (i = 0; i < EDITOR_GRAPHIC_COUNT; i++) {
         if (gCharacterEditorFrmShouldCopy[i]) {
-            gCharacterEditorFrmCopy[i] = (unsigned char*)internal_malloc(gCharacterEditorFrmSize[i].width * gCharacterEditorFrmSize[i].height);
+            gCharacterEditorFrmCopy[i] = (unsigned char*)internal_malloc(_editorFrmImages[i].getWidth() * _editorFrmImages[i].getHeight());
             if (gCharacterEditorFrmCopy[i] == NULL) {
                 break;
             }
-            memcpy(gCharacterEditorFrmCopy[i], gCharacterEditorFrmData[i], gCharacterEditorFrmSize[i].width * gCharacterEditorFrmSize[i].height);
+            memcpy(gCharacterEditorFrmCopy[i], _editorFrmImages[i].getData(), _editorFrmImages[i].getWidth() * _editorFrmImages[i].getHeight());
         } else {
             gCharacterEditorFrmCopy[i] = (unsigned char*)-1;
         }
@@ -1344,10 +1349,10 @@ static int characterEditorWindowInit()
         }
 
         for (i = 0; i < EDITOR_GRAPHIC_COUNT; i++) {
-            artUnlock(gCharacterEditorFrmHandle[i]);
+            _editorFrmImages[i].unlock();
         }
 
-        artUnlock(gCharacterEditorWindowBackgroundHandle);
+        _editorBackgroundFrmImage.unlock();
 
         messageListFree(&gCharacterEditorMessageList);
         if (gCharacterEditorIsoWasEnabled) {
@@ -1367,16 +1372,16 @@ static int characterEditorWindowInit()
         EDITOR_WINDOW_WIDTH,
         EDITOR_WINDOW_HEIGHT,
         256,
-        WINDOW_FLAG_0x10 | WINDOW_FLAG_0x02);
+        WINDOW_MODAL | WINDOW_DONT_MOVE_TOP);
     if (gCharacterEditorWindow == -1) {
         for (i = 0; i < EDITOR_GRAPHIC_COUNT; i++) {
             if (gCharacterEditorFrmShouldCopy[i]) {
                 internal_free(gCharacterEditorFrmCopy[i]);
             }
-            artUnlock(gCharacterEditorFrmHandle[i]);
+            _editorFrmImages[i].unlock();
         }
 
-        artUnlock(gCharacterEditorWindowBackgroundHandle);
+        _editorBackgroundFrmImage.unlock();
 
         messageListFree(&gCharacterEditorMessageList);
         if (gCharacterEditorIsoWasEnabled) {
@@ -1390,7 +1395,7 @@ static int characterEditorWindowInit()
     }
 
     gCharacterEditorWindowBuffer = windowGetBuffer(gCharacterEditorWindow);
-    memcpy(gCharacterEditorWindowBuffer, gCharacterEditorWindowBackgroundBuffer, 640 * 480);
+    memcpy(gCharacterEditorWindowBuffer, _editorBackgroundFrmImage.getData(), 640 * 480);
 
     if (gCharacterEditorIsCreationMode) {
         fontSetCurrent(103);
@@ -1428,68 +1433,68 @@ static int characterEditorWindowInit()
         // perks selected
         len = fontGetStringWidth(perks);
         fontDrawText(
-            gCharacterEditorFrmCopy[46] + 5 * gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width + 61 - len / 2,
+            gCharacterEditorFrmCopy[46] + 5 * _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth() + 61 - len / 2,
             perks,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
             _colorTable[18979]);
 
         len = fontGetStringWidth(karma);
-        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED] + 5 * gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width + 159 - len / 2,
+        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED] + 5 * _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth() + 159 - len / 2,
             karma,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
             _colorTable[14723]);
 
         len = fontGetStringWidth(kills);
-        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED] + 5 * gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width + 257 - len / 2,
+        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED] + 5 * _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth() + 257 - len / 2,
             kills,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
             _colorTable[14723]);
 
         // karma selected
         len = fontGetStringWidth(perks);
-        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KARMA_FOLDER_SELECTED] + 5 * gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width + 61 - len / 2,
+        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KARMA_FOLDER_SELECTED] + 5 * _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth() + 61 - len / 2,
             perks,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
             _colorTable[14723]);
 
         len = fontGetStringWidth(karma);
-        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KARMA_FOLDER_SELECTED] + 5 * gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width + 159 - len / 2,
+        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KARMA_FOLDER_SELECTED] + 5 * _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth() + 159 - len / 2,
             karma,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
             _colorTable[18979]);
 
         len = fontGetStringWidth(kills);
-        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KARMA_FOLDER_SELECTED] + 5 * gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width + 257 - len / 2,
+        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KARMA_FOLDER_SELECTED] + 5 * _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth() + 257 - len / 2,
             kills,
-            gCharacterEditorFrmSize[46].width,
-            gCharacterEditorFrmSize[46].width,
+            _editorFrmImages[46].getWidth(),
+            _editorFrmImages[46].getWidth(),
             _colorTable[14723]);
 
         // kills selected
         len = fontGetStringWidth(perks);
-        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KILLS_FOLDER_SELECTED] + 5 * gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width + 61 - len / 2,
+        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KILLS_FOLDER_SELECTED] + 5 * _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth() + 61 - len / 2,
             perks,
-            gCharacterEditorFrmSize[46].width,
-            gCharacterEditorFrmSize[46].width,
+            _editorFrmImages[46].getWidth(),
+            _editorFrmImages[46].getWidth(),
             _colorTable[14723]);
 
         len = fontGetStringWidth(karma);
-        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KILLS_FOLDER_SELECTED] + 5 * gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width + 159 - len / 2,
+        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KILLS_FOLDER_SELECTED] + 5 * _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth() + 159 - len / 2,
             karma,
-            gCharacterEditorFrmSize[46].width,
-            gCharacterEditorFrmSize[46].width,
+            _editorFrmImages[46].getWidth(),
+            _editorFrmImages[46].getWidth(),
             _colorTable[14723]);
 
         len = fontGetStringWidth(kills);
-        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KILLS_FOLDER_SELECTED] + 5 * gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width + 257 - len / 2,
+        fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KILLS_FOLDER_SELECTED] + 5 * _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth() + 257 - len / 2,
             kills,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
             _colorTable[18979]);
 
         characterEditorDrawFolders();
@@ -1522,28 +1527,28 @@ static int characterEditorWindowInit()
             gCharacterEditorWindow,
             614,
             20,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_PLUS_ON].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_PLUS_ON].height,
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getHeight(),
             -1,
             522,
             521,
             522,
-            gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_PLUS_OFF],
-            gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_PLUS_ON],
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_OFF].getData(),
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getData(),
             0,
             96);
         gCharacterEditorSliderMinusBtn = buttonCreate(
             gCharacterEditorWindow,
             614,
-            20 + gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_MINUS_ON].height - 1,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_MINUS_ON].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_MINUS_OFF].height,
+            20 + _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_ON].getHeight() - 1,
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_ON].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_OFF].getHeight(),
             -1,
             524,
             523,
             524,
-            gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_MINUS_OFF],
-            gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_MINUS_ON],
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_OFF].getData(),
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_ON].getData(),
             0,
             96);
         buttonSetCallbacks(gCharacterEditorSliderPlusBtn, _gsound_red_butt_press, NULL);
@@ -1563,8 +1568,8 @@ static int characterEditorWindowInit()
             gCharacterEditorWindow,
             x,
             NAME_BUTTON_Y,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].height,
+            _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getHeight(),
             -1,
             -1,
             -1,
@@ -1574,17 +1579,17 @@ static int characterEditorWindowInit()
             0,
             32);
         if (btn != -1) {
-            buttonSetMask(btn, gCharacterEditorFrmData[EDITOR_GRAPHIC_NAME_MASK]);
+            buttonSetMask(btn, _editorFrmImages[EDITOR_GRAPHIC_NAME_MASK].getData());
             buttonSetCallbacks(btn, _gsound_lrg_butt_press, NULL);
         }
 
-        x += gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].width;
+        x += _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getWidth();
         btn = buttonCreate(
             gCharacterEditorWindow,
             x,
             NAME_BUTTON_Y,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].height,
+            _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getHeight(),
             -1,
             -1,
             -1,
@@ -1594,17 +1599,17 @@ static int characterEditorWindowInit()
             0,
             32);
         if (btn != -1) {
-            buttonSetMask(btn, gCharacterEditorFrmData[EDITOR_GRAPHIC_AGE_MASK]);
+            buttonSetMask(btn, _editorFrmImages[EDITOR_GRAPHIC_AGE_MASK].getData());
             buttonSetCallbacks(btn, _gsound_lrg_butt_press, NULL);
         }
 
-        x += gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].width;
+        x += _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getWidth();
         btn = buttonCreate(
             gCharacterEditorWindow,
             x,
             NAME_BUTTON_Y,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SEX_ON].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SEX_ON].height,
+            _editorFrmImages[EDITOR_GRAPHIC_SEX_ON].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_SEX_ON].getHeight(),
             -1,
             -1,
             -1,
@@ -1614,7 +1619,7 @@ static int characterEditorWindowInit()
             0,
             32);
         if (btn != -1) {
-            buttonSetMask(btn, gCharacterEditorFrmData[EDITOR_GRAPHIC_SEX_MASK]);
+            buttonSetMask(btn, _editorFrmImages[EDITOR_GRAPHIC_SEX_MASK].getData());
             buttonSetCallbacks(btn, _gsound_lrg_butt_press, NULL);
         }
 
@@ -1624,17 +1629,17 @@ static int characterEditorWindowInit()
                 gCharacterEditorWindow,
                 TAG_SKILLS_BUTTON_X,
                 y,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].width,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].height,
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getWidth(),
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getHeight(),
                 -1,
                 -1,
                 -1,
                 TAG_SKILLS_BUTTON_CODE + i,
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_OFF],
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON],
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_OFF].getData(),
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getData(),
                 NULL,
                 32);
-            y += gCharacterEditorFrmSize[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].height;
+            y += _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getHeight();
         }
 
         y = OPTIONAL_TRAITS_BTN_Y;
@@ -1643,17 +1648,17 @@ static int characterEditorWindowInit()
                 gCharacterEditorWindow,
                 OPTIONAL_TRAITS_LEFT_BTN_X,
                 y,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].width,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].height,
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getWidth(),
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getHeight(),
                 -1,
                 -1,
                 -1,
                 OPTIONAL_TRAITS_BTN_CODE + i,
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_OFF],
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON],
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_OFF].getData(),
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getData(),
                 NULL,
                 32);
-            y += gCharacterEditorFrmSize[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].height + OPTIONAL_TRAITS_BTN_SPACE;
+            y += _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getHeight() + OPTIONAL_TRAITS_BTN_SPACE;
         }
 
         y = OPTIONAL_TRAITS_BTN_Y;
@@ -1662,50 +1667,50 @@ static int characterEditorWindowInit()
                 gCharacterEditorWindow,
                 OPTIONAL_TRAITS_RIGHT_BTN_X,
                 y,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].width,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].height,
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getWidth(),
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getHeight(),
                 -1,
                 -1,
                 -1,
                 OPTIONAL_TRAITS_BTN_CODE + i,
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_OFF],
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON],
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_OFF].getData(),
+                _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getData(),
                 NULL,
                 32);
-            y += gCharacterEditorFrmSize[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].height + OPTIONAL_TRAITS_BTN_SPACE;
+            y += _editorFrmImages[EDITOR_GRAPHIC_TAG_SKILL_BUTTON_ON].getHeight() + OPTIONAL_TRAITS_BTN_SPACE;
         }
 
         characterEditorDrawOptionalTraits();
     } else {
         x = NAME_BUTTON_X;
         blitBufferToBufferTrans(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_NAME_OFF],
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].height,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].width,
+            _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getHeight(),
+            _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getWidth(),
             gCharacterEditorWindowBuffer + (EDITOR_WINDOW_WIDTH * NAME_BUTTON_Y) + x,
             EDITOR_WINDOW_WIDTH);
 
-        x += gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].width;
+        x += _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getWidth();
         blitBufferToBufferTrans(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_AGE_OFF],
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].height,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].width,
+            _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getHeight(),
+            _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getWidth(),
             gCharacterEditorWindowBuffer + (EDITOR_WINDOW_WIDTH * NAME_BUTTON_Y) + x,
             EDITOR_WINDOW_WIDTH);
 
-        x += gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].width;
+        x += _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getWidth();
         blitBufferToBufferTrans(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_SEX_OFF],
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SEX_ON].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SEX_ON].height,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SEX_ON].width,
+            _editorFrmImages[EDITOR_GRAPHIC_SEX_ON].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_SEX_ON].getHeight(),
+            _editorFrmImages[EDITOR_GRAPHIC_SEX_ON].getWidth(),
             gCharacterEditorWindowBuffer + (EDITOR_WINDOW_WIDTH * NAME_BUTTON_Y) + x,
             EDITOR_WINDOW_WIDTH);
 
         btn = buttonCreate(gCharacterEditorWindow,
             11,
             327,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_FOLDER_MASK].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_FOLDER_MASK].height,
+            _editorFrmImages[EDITOR_GRAPHIC_FOLDER_MASK].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_FOLDER_MASK].getHeight(),
             -1,
             -1,
             -1,
@@ -1715,7 +1720,7 @@ static int characterEditorWindowInit()
             NULL,
             BUTTON_FLAG_TRANSPARENT);
         if (btn != -1) {
-            buttonSetMask(btn, gCharacterEditorFrmData[EDITOR_GRAPHIC_FOLDER_MASK]);
+            buttonSetMask(btn, _editorFrmImages[EDITOR_GRAPHIC_FOLDER_MASK].getData());
         }
     }
 
@@ -1725,14 +1730,14 @@ static int characterEditorWindowInit()
             gCharacterEditorPrimaryStatPlusBtns[i] = buttonCreate(gCharacterEditorWindow,
                 SPECIAL_STATS_BTN_X,
                 gCharacterEditorPrimaryStatY[i],
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_PLUS_ON].width,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_PLUS_ON].height,
+                _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getWidth(),
+                _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getHeight(),
                 -1,
                 518,
                 503 + i,
                 518,
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_PLUS_OFF],
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_PLUS_ON],
+                _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_OFF].getData(),
+                _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getData(),
                 NULL,
                 32);
             if (gCharacterEditorPrimaryStatPlusBtns[i] != -1) {
@@ -1741,15 +1746,15 @@ static int characterEditorWindowInit()
 
             gCharacterEditorPrimaryStatMinusBtns[i] = buttonCreate(gCharacterEditorWindow,
                 SPECIAL_STATS_BTN_X,
-                gCharacterEditorPrimaryStatY[i] + gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_PLUS_ON].height - 1,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_MINUS_ON].width,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_MINUS_ON].height,
+                gCharacterEditorPrimaryStatY[i] + _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getHeight() - 1,
+                _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_ON].getWidth(),
+                _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_ON].getHeight(),
                 -1,
                 518,
                 510 + i,
                 518,
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_MINUS_OFF],
-                gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_MINUS_ON],
+                _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_OFF].getData(),
+                _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_ON].getData(),
                 NULL,
                 32);
             if (gCharacterEditorPrimaryStatMinusBtns[i] != -1) {
@@ -1765,14 +1770,14 @@ static int characterEditorWindowInit()
         gCharacterEditorWindow,
         343,
         454,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].height,
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getHeight(),
         -1,
         -1,
         -1,
         501,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN],
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (btn != -1) {
@@ -1783,14 +1788,14 @@ static int characterEditorWindowInit()
         gCharacterEditorWindow,
         552,
         454,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].height,
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getHeight(),
         -1,
         -1,
         -1,
         502,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN],
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN].getData(),
         0,
         BUTTON_FLAG_TRANSPARENT);
     if (btn != -1) {
@@ -1801,14 +1806,14 @@ static int characterEditorWindowInit()
         gCharacterEditorWindow,
         455,
         454,
-        gCharacterEditorFrmSize[23].width,
-        gCharacterEditorFrmSize[23].height,
+        _editorFrmImages[23].getWidth(),
+        _editorFrmImages[23].getHeight(),
         -1,
         -1,
         -1,
         500,
-        gCharacterEditorFrmData[23],
-        gCharacterEditorFrmData[24],
+        _editorFrmImages[23].getData(),
+        _editorFrmImages[24].getData(),
         0,
         BUTTON_FLAG_TRANSPARENT);
     if (btn != -1) {
@@ -1837,14 +1842,14 @@ static void characterEditorWindowFree()
     windowDestroy(gCharacterEditorWindow);
 
     for (int index = 0; index < EDITOR_GRAPHIC_COUNT; index++) {
-        artUnlock(gCharacterEditorFrmHandle[index]);
+        _editorFrmImages[index].unlock();
 
         if (gCharacterEditorFrmShouldCopy[index]) {
             internal_free(gCharacterEditorFrmCopy[index]);
         }
     }
 
-    artUnlock(gCharacterEditorWindowBackgroundHandle);
+    _editorBackgroundFrmImage.unlock();
 
     // NOTE: Uninline.
     genericReputationFree();
@@ -1854,6 +1859,9 @@ static void characterEditorWindowFree()
 
     // SFALL: Custom karma folder.
     customKarmaFolderFree();
+
+    // SFALL: Custom town reputation.
+    customTownReputationFree();
 
     messageListFree(&gCharacterEditorMessageList);
 
@@ -1913,7 +1921,7 @@ static int _get_input_str(int win, int cancelKeyCode, char* text, int maxLength,
     char copy[257];
     strcpy(copy, text);
 
-    int nameLength = strlen(text);
+    size_t nameLength = strlen(text);
     copy[nameLength] = ' ';
     copy[nameLength + 1] = '\0';
 
@@ -1924,14 +1932,18 @@ static int _get_input_str(int win, int cancelKeyCode, char* text, int maxLength,
 
     windowRefresh(win);
 
+    beginTextInput();
+
     int blinkingCounter = 3;
     bool blink = false;
 
     int rc = 1;
     while (rc == 1) {
-        _frame_time = _get_time();
+        sharedFpsLimiter.mark();
 
-        int keyCode = _get_input();
+        _frame_time = getTicks();
+
+        int keyCode = inputGetInput();
         if (keyCode == cancelKeyCode) {
             rc = 0;
         } else if (keyCode == KEY_RETURN) {
@@ -1980,7 +1992,12 @@ static int _get_input_str(int win, int cancelKeyCode, char* text, int maxLength,
         windowRefresh(win);
 
         while (getTicksSince(_frame_time) < 1000 / 24) { }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
     }
+
+    endTextInput();
 
     if (rc == 0 || nameLength > 0) {
         copy[nameLength] = '\0';
@@ -1999,8 +2016,8 @@ bool _isdoschar(int ch)
         return true;
     }
 
-    int length = strlen(punctuations);
-    for (int index = 0; index < length; index++) {
+    size_t length = strlen(punctuations);
+    for (size_t index = 0; index < length; index++) {
         if (punctuations[index] == ch) {
             return true;
         }
@@ -2034,34 +2051,34 @@ static void characterEditorDrawFolders()
         return;
     }
 
-    blitBufferToBuffer(gCharacterEditorWindowBackgroundBuffer + (360 * 640) + 34, 280, 120, 640, gCharacterEditorWindowBuffer + (360 * 640) + 34, 640);
+    blitBufferToBuffer(_editorBackgroundFrmImage.getData() + (360 * 640) + 34, 280, 120, 640, gCharacterEditorWindowBuffer + (360 * 640) + 34, 640);
 
     fontSetCurrent(101);
 
     switch (characterEditorWindowSelectedFolder) {
     case EDITOR_FOLDER_PERKS:
         blitBufferToBuffer(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED],
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].height,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getHeight(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
             gCharacterEditorWindowBuffer + (327 * 640) + 11,
             640);
         characterEditorDrawPerksFolder();
         break;
     case EDITOR_FOLDER_KARMA:
         blitBufferToBuffer(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KARMA_FOLDER_SELECTED],
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].height,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getHeight(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
             gCharacterEditorWindowBuffer + (327 * 640) + 11,
             640);
         characterEditorDrawKarmaFolder();
         break;
     case EDITOR_FOLDER_KILLS:
         blitBufferToBuffer(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_KILLS_FOLDER_SELECTED],
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].height,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].width,
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getHeight(),
+            _editorFrmImages[EDITOR_GRAPHIC_PERKS_FOLDER_SELECTED].getWidth(),
             gCharacterEditorWindowBuffer + (327 * 640) + 11,
             640);
         gCharacterEditorKillsCount = characterEditorDrawKillsFolder();
@@ -2136,9 +2153,9 @@ static void characterEditorDrawPerksFolder()
                 string = perkGetName(perk);
 
                 if (perkLevel == 1) {
-                    strcpy(perkName, string);
+                    snprintf(perkName, sizeof(perkName), "%s", string);
                 } else {
-                    sprintf(perkName, "%s (%d)", string, perkLevel);
+                    snprintf(perkName, sizeof(perkName), "%s (%d)", string, perkLevel);
                 }
 
                 if (characterEditorFolderViewDrawString(perkName)) {
@@ -2202,7 +2219,7 @@ static int characterEditorDrawKillsFolder()
                 gCharacterEditorFolderCardTitle = gCharacterEditorFolderCardString;
                 gCharacterEditorFolderCardSubtitle = NULL;
                 gCharacterEditorFolderCardDescription = killTypeGetDescription(kills[i].killTypeId);
-                sprintf(gCharacterEditorFolderCardString, "%s %s", killInfo->name, getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 126));
+                snprintf(gCharacterEditorFolderCardString, sizeof(gCharacterEditorFolderCardString), "%s %s", killInfo->name, getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 126));
                 hasContent = true;
             }
         }
@@ -2238,12 +2255,12 @@ static void characterEditorDrawBigNumber(int x, int y, int flags, int value, int
     rect.right = x + BIG_NUM_WIDTH * 2;
     rect.bottom = y + BIG_NUM_HEIGHT;
 
-    numbersGraphicBufferPtr = gCharacterEditorFrmData[0];
+    numbersGraphicBufferPtr = _editorFrmImages[0].getData();
 
     if (flags & RED_NUMBERS) {
         // First half of the bignum.frm is white,
         // second half is red.
-        numbersGraphicBufferPtr += gCharacterEditorFrmSize[EDITOR_GRAPHIC_BIG_NUMBERS].width / 2;
+        numbersGraphicBufferPtr += _editorFrmImages[EDITOR_GRAPHIC_BIG_NUMBERS].getWidth() / 2;
     }
 
     tensBufferPtr = windowBuf + windowWidth * y + x;
@@ -2255,14 +2272,15 @@ static void characterEditorDrawBigNumber(int x, int y, int flags, int value, int
 
         if (flags & ANIMATE) {
             if (previousValue % 10 != ones) {
-                _frame_time = _get_time();
+                _frame_time = getTicks();
                 blitBufferToBuffer(numbersGraphicBufferPtr + BIG_NUM_WIDTH * 11,
                     BIG_NUM_WIDTH,
                     BIG_NUM_HEIGHT,
-                    gCharacterEditorFrmSize[EDITOR_GRAPHIC_BIG_NUMBERS].width,
+                    _editorFrmImages[EDITOR_GRAPHIC_BIG_NUMBERS].getWidth(),
                     onesBufferPtr,
                     windowWidth);
                 windowRefreshRect(windowHandle, &rect);
+                renderPresent();
                 while (getTicksSince(_frame_time) < BIG_NUM_ANIMATION_DELAY)
                     ;
             }
@@ -2270,20 +2288,22 @@ static void characterEditorDrawBigNumber(int x, int y, int flags, int value, int
             blitBufferToBuffer(numbersGraphicBufferPtr + BIG_NUM_WIDTH * ones,
                 BIG_NUM_WIDTH,
                 BIG_NUM_HEIGHT,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_BIG_NUMBERS].width,
+                _editorFrmImages[EDITOR_GRAPHIC_BIG_NUMBERS].getWidth(),
                 onesBufferPtr,
                 windowWidth);
             windowRefreshRect(windowHandle, &rect);
+            renderPresent();
 
             if (previousValue / 10 != tens) {
-                _frame_time = _get_time();
+                _frame_time = getTicks();
                 blitBufferToBuffer(numbersGraphicBufferPtr + BIG_NUM_WIDTH * 11,
                     BIG_NUM_WIDTH,
                     BIG_NUM_HEIGHT,
-                    gCharacterEditorFrmSize[EDITOR_GRAPHIC_BIG_NUMBERS].width,
+                    _editorFrmImages[EDITOR_GRAPHIC_BIG_NUMBERS].getWidth(),
                     tensBufferPtr,
                     windowWidth);
                 windowRefreshRect(windowHandle, &rect);
+                renderPresent();
                 while (getTicksSince(_frame_time) < BIG_NUM_ANIMATION_DELAY)
                     ;
             }
@@ -2291,21 +2311,22 @@ static void characterEditorDrawBigNumber(int x, int y, int flags, int value, int
             blitBufferToBuffer(numbersGraphicBufferPtr + BIG_NUM_WIDTH * tens,
                 BIG_NUM_WIDTH,
                 BIG_NUM_HEIGHT,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_BIG_NUMBERS].width,
+                _editorFrmImages[EDITOR_GRAPHIC_BIG_NUMBERS].getWidth(),
                 tensBufferPtr,
                 windowWidth);
             windowRefreshRect(windowHandle, &rect);
+            renderPresent();
         } else {
             blitBufferToBuffer(numbersGraphicBufferPtr + BIG_NUM_WIDTH * tens,
                 BIG_NUM_WIDTH,
                 BIG_NUM_HEIGHT,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_BIG_NUMBERS].width,
+                _editorFrmImages[EDITOR_GRAPHIC_BIG_NUMBERS].getWidth(),
                 tensBufferPtr,
                 windowWidth);
             blitBufferToBuffer(numbersGraphicBufferPtr + BIG_NUM_WIDTH * ones,
                 BIG_NUM_WIDTH,
                 BIG_NUM_HEIGHT,
-                gCharacterEditorFrmSize[EDITOR_GRAPHIC_BIG_NUMBERS].width,
+                _editorFrmImages[EDITOR_GRAPHIC_BIG_NUMBERS].getWidth(),
                 onesBufferPtr,
                 windowWidth);
         }
@@ -2314,13 +2335,13 @@ static void characterEditorDrawBigNumber(int x, int y, int flags, int value, int
         blitBufferToBuffer(numbersGraphicBufferPtr + BIG_NUM_WIDTH * 9,
             BIG_NUM_WIDTH,
             BIG_NUM_HEIGHT,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_BIG_NUMBERS].width,
+            _editorFrmImages[EDITOR_GRAPHIC_BIG_NUMBERS].getWidth(),
             tensBufferPtr,
             windowWidth);
         blitBufferToBuffer(numbersGraphicBufferPtr + BIG_NUM_WIDTH * 9,
             BIG_NUM_WIDTH,
             BIG_NUM_HEIGHT,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_BIG_NUMBERS].width,
+            _editorFrmImages[EDITOR_GRAPHIC_BIG_NUMBERS].getWidth(),
             onesBufferPtr,
             windowWidth);
     }
@@ -2352,7 +2373,7 @@ static void characterEditorDrawPcStats()
 
     fontSetCurrent(101);
 
-    blitBufferToBuffer(gCharacterEditorWindowBackgroundBuffer + 640 * 280 + 32, 124, 32, 640, gCharacterEditorWindowBuffer + 640 * 280 + 32, 640);
+    blitBufferToBuffer(_editorBackgroundFrmImage.getData() + 640 * 280 + 32, 124, 32, 640, gCharacterEditorWindowBuffer + 640 * 280 + 32, 640);
 
     // LEVEL
     y = 280;
@@ -2363,7 +2384,7 @@ static void characterEditorDrawPcStats()
     }
 
     int level = pcGetStat(PC_STAT_LEVEL);
-    sprintf(stringBuffer, "%s %d",
+    snprintf(stringBuffer, sizeof(stringBuffer), "%s %d",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 113),
         level);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 32, stringBuffer, 640, 640, color);
@@ -2377,7 +2398,7 @@ static void characterEditorDrawPcStats()
     }
 
     int exp = pcGetStat(PC_STAT_EXPERIENCE);
-    sprintf(stringBuffer, "%s %s",
+    snprintf(stringBuffer, sizeof(stringBuffer), "%s %s",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 114),
         _itostndn(exp, formattedValueBuffer));
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 32, stringBuffer, 640, 640, color);
@@ -2403,7 +2424,7 @@ static void characterEditorDrawPcStats()
         formattedValue = _itostndn(expToNextLevel, formattedValueBuffer);
     }
 
-    sprintf(stringBuffer, "%s %s",
+    snprintf(stringBuffer, sizeof(stringBuffer), "%s %s",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, expMsgId),
         formattedValue);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 32, stringBuffer, 640, 640, color);
@@ -2454,7 +2475,7 @@ static void characterEditorDrawPrimaryStat(int stat, bool animate, int previousV
 
         characterEditorDrawBigNumber(58, gCharacterEditorPrimaryStatY[stat], flags, value, previousValue, gCharacterEditorWindow);
 
-        blitBufferToBuffer(gCharacterEditorWindowBackgroundBuffer + off, 40, fontGetLineHeight(), 640, gCharacterEditorWindowBuffer + off, 640);
+        blitBufferToBuffer(_editorBackgroundFrmImage.getData() + off, 40, fontGetLineHeight(), 640, gCharacterEditorWindowBuffer + off, 640);
 
         messageListItemId = critterGetStat(gDude, stat) + 199;
         if (messageListItemId > 210) {
@@ -2466,7 +2487,7 @@ static void characterEditorDrawPrimaryStat(int stat, bool animate, int previousV
     } else {
         value = critterGetStat(gDude, stat);
         characterEditorDrawBigNumber(58, gCharacterEditorPrimaryStatY[stat], 0, value, 0, gCharacterEditorWindow);
-        blitBufferToBuffer(gCharacterEditorWindowBackgroundBuffer + off, 40, fontGetLineHeight(), 640, gCharacterEditorWindowBuffer + off, 640);
+        blitBufferToBuffer(_editorBackgroundFrmImage.getData() + off, 40, fontGetLineHeight(), 640, gCharacterEditorWindowBuffer + off, 640);
 
         value = critterGetStat(gDude, stat);
         if (value > 10) {
@@ -2493,15 +2514,15 @@ static void characterEditorDrawGender()
 
     strcpy(text, str);
 
-    width = gCharacterEditorFrmSize[EDITOR_GRAPHIC_SEX_ON].width;
+    width = _editorFrmImages[EDITOR_GRAPHIC_SEX_ON].getWidth();
     x = (width / 2) - (fontGetStringWidth(text) / 2);
 
     memcpy(gCharacterEditorFrmCopy[11],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_SEX_ON],
-        width * gCharacterEditorFrmSize[EDITOR_GRAPHIC_SEX_ON].height);
+        _editorFrmImages[EDITOR_GRAPHIC_SEX_ON].getData(),
+        width * _editorFrmImages[EDITOR_GRAPHIC_SEX_ON].getHeight());
     memcpy(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_SEX_OFF],
-        gCharacterEditorFrmData[10],
-        width * gCharacterEditorFrmSize[EDITOR_GRAPHIC_SEX_OFF].height);
+        _editorFrmImages[10].getData(),
+        width * _editorFrmImages[EDITOR_GRAPHIC_SEX_OFF].getHeight());
 
     x += 6 * width;
     fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_SEX_ON] + x, text, width, width, _colorTable[14723]);
@@ -2521,17 +2542,17 @@ static void characterEditorDrawAge()
     age = critterGetStat(gDude, STAT_AGE);
     str = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 104);
 
-    sprintf(text, "%s %d", str, age);
+    snprintf(text, sizeof(text), "%s %d", str, age);
 
-    width = gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].width;
+    width = _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getWidth();
     x = (width / 2) + 1 - (fontGetStringWidth(text) / 2);
 
     memcpy(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_AGE_ON],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_AGE_ON],
-        width * gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].height);
+        _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getData(),
+        width * _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getHeight());
     memcpy(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_AGE_OFF],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_AGE_OFF],
-        width * gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].height);
+        _editorFrmImages[EDITOR_GRAPHIC_AGE_OFF].getData(),
+        width * _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getHeight());
 
     x += 6 * width;
     fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_AGE_ON] + x, text, width, width, _colorTable[14723]);
@@ -2579,15 +2600,15 @@ static void characterEditorDrawName()
         }
     }
 
-    width = gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].width;
+    width = _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getWidth();
     x = (width / 2) + 3 - (fontGetStringWidth(text) / 2);
 
     memcpy(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_NAME_ON],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_NAME_ON],
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].width * gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].height);
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getWidth() * _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getHeight());
     memcpy(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_NAME_OFF],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_NAME_OFF],
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_OFF].width * gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_OFF].height);
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_OFF].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_OFF].getWidth() * _editorFrmImages[EDITOR_GRAPHIC_NAME_OFF].getHeight());
 
     x += 6 * width;
     fontDrawText(gCharacterEditorFrmCopy[EDITOR_GRAPHIC_NAME_ON] + x, text, width, width, _colorTable[14723]);
@@ -2609,7 +2630,7 @@ static void characterEditorDrawDerivedStats()
 
     y = 46;
 
-    blitBufferToBuffer(gCharacterEditorWindowBackgroundBuffer + 640 * y + 194, 118, 108, 640, gCharacterEditorWindowBuffer + 640 * y + 194, 640);
+    blitBufferToBuffer(_editorBackgroundFrmImage.getData() + 640 * y + 194, 118, 108, 640, gCharacterEditorWindowBuffer + 640 * y + 194, 640);
 
     // Hit Points
     if (characterEditorSelectedItem == EDITOR_HIT_POINTS) {
@@ -2629,10 +2650,10 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 300);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
-    sprintf(t, "%d/%d", currHp, maxHp);
+    snprintf(t, sizeof(t), "%d/%d", currHp, maxHp);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 263, t, 640, 640, color);
 
     // Poisoned
@@ -2645,7 +2666,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 312);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     // Radiated
@@ -2658,7 +2679,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 313);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     // Eye Damage
@@ -2671,7 +2692,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 314);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     // Crippled Right Arm
@@ -2684,7 +2705,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 315);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     // Crippled Left Arm
@@ -2697,7 +2718,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 316);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     // Crippled Right Leg
@@ -2710,7 +2731,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 317);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     // Crippled Left Leg
@@ -2723,12 +2744,12 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 318);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     y = 179;
 
-    blitBufferToBuffer(gCharacterEditorWindowBackgroundBuffer + 640 * y + 194, 116, 130, 640, gCharacterEditorWindowBuffer + 640 * y + 194, 640);
+    blitBufferToBuffer(_editorBackgroundFrmImage.getData() + 640 * y + 194, 116, 130, 640, gCharacterEditorWindowBuffer + 640 * y + 194, 640);
 
     // Armor Class
     if (characterEditorSelectedItem == EDITOR_FIRST_DERIVED_STAT + EDITOR_DERIVED_STAT_ARMOR_CLASS) {
@@ -2738,7 +2759,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 302);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     compat_itoa(critterGetStat(gDude, STAT_ARMOR_CLASS), t, 10);
@@ -2754,7 +2775,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 301);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     compat_itoa(critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS), t, 10);
@@ -2770,7 +2791,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 311);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     compat_itoa(critterGetStat(gDude, STAT_CARRY_WEIGHT), t, 10);
@@ -2786,10 +2807,16 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 304);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
-    compat_itoa(critterGetStat(gDude, STAT_MELEE_DAMAGE), t, 10);
+    // SFALL: Display melee damage without "Bonus HtH Damage" bonus.
+    int meleeDamage = critterGetStat(gDude, STAT_MELEE_DAMAGE);
+    if (!damageModGetDisplayBonusDamage()) {
+        meleeDamage -= 2 * perkGetRank(gDude, PERK_BONUS_HTH_DAMAGE);
+    }
+
+    compat_itoa(meleeDamage, t, 10);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 288, t, 640, 640, color);
 
     // Damage Resistance
@@ -2802,10 +2829,10 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 305);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
-    sprintf(t, "%d%%", critterGetStat(gDude, STAT_DAMAGE_RESISTANCE));
+    snprintf(t, sizeof(t), "%d%%", critterGetStat(gDude, STAT_DAMAGE_RESISTANCE));
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 288, t, 640, 640, color);
 
     // Poison Resistance
@@ -2818,10 +2845,10 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 306);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
-    sprintf(t, "%d%%", critterGetStat(gDude, STAT_POISON_RESISTANCE));
+    snprintf(t, sizeof(t), "%d%%", critterGetStat(gDude, STAT_POISON_RESISTANCE));
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 288, t, 640, 640, color);
 
     // Radiation Resistance
@@ -2834,10 +2861,10 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 307);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
-    sprintf(t, "%d%%", critterGetStat(gDude, STAT_RADIATION_RESISTANCE));
+    snprintf(t, sizeof(t), "%d%%", critterGetStat(gDude, STAT_RADIATION_RESISTANCE));
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 288, t, 640, 640, color);
 
     // Sequence
@@ -2850,7 +2877,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 308);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     compat_itoa(critterGetStat(gDude, STAT_SEQUENCE), t, 10);
@@ -2866,7 +2893,7 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 309);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
     compat_itoa(critterGetStat(gDude, STAT_HEALING_RATE), t, 10);
@@ -2882,10 +2909,10 @@ static void characterEditorDrawDerivedStats()
     }
 
     messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 310);
-    sprintf(t, "%s", messageListItemText);
+    snprintf(t, sizeof(t), "%s", messageListItemText);
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 194, t, 640, 640, color);
 
-    sprintf(t, "%d%%", critterGetStat(gDude, STAT_CRITICAL_CHANCE));
+    snprintf(t, sizeof(t), "%d%%", critterGetStat(gDude, STAT_CRITICAL_CHANCE));
     fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 288, t, 640, 640, color);
 }
 
@@ -2898,7 +2925,7 @@ static void characterEditorDrawSkills(int a1)
     int color;
     int y;
     int value;
-    char valueString[12]; // TODO: Size might be wrong.
+    char valueString[32];
 
     if (characterEditorSelectedItem >= EDITOR_FIRST_SKILL && characterEditorSelectedItem < 79) {
         selectedSkill = characterEditorSelectedItem - EDITOR_FIRST_SKILL;
@@ -2911,7 +2938,7 @@ static void characterEditorDrawSkills(int a1)
         gCharacterEditorSliderPlusBtn = -1;
     }
 
-    blitBufferToBuffer(gCharacterEditorWindowBackgroundBuffer + 370, 270, 252, 640, gCharacterEditorWindowBuffer + 370, 640);
+    blitBufferToBuffer(_editorBackgroundFrmImage.getData() + 370, 270, 252, 640, gCharacterEditorWindowBuffer + 370, 640);
 
     fontSetCurrent(103);
 
@@ -2931,7 +2958,6 @@ static void characterEditorDrawSkills(int a1)
         str = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 138);
         fontDrawText(gCharacterEditorWindowBuffer + 640 * 233 + 422, str, 640, 640, _colorTable[18979]);
 
-        // TODO: Check.
         if (a1 == 2 && !gCharacterEditorIsSkillsFirstDraw) {
             characterEditorDrawBigNumber(522, 228, ANIMATE, gCharacterEditorTaggedSkillCount, gCharacterEditorOldTaggedSkillCount, gCharacterEditorWindow);
         } else {
@@ -2964,9 +2990,8 @@ static void characterEditorDrawSkills(int a1)
         fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 380, str, 640, 640, color);
 
         value = skillGetValue(gDude, i);
-        sprintf(valueString, "%d%%", value);
+        snprintf(valueString, sizeof(valueString), "%d%%", value);
 
-        // TODO: Check text position.
         fontDrawText(gCharacterEditorWindowBuffer + 640 * y + 573, valueString, 640, 640, color);
 
         y += fontGetLineHeight() + 1;
@@ -2977,10 +3002,10 @@ static void characterEditorDrawSkills(int a1)
         gCharacterEditorSkillValueAdjustmentSliderY = y + 27;
 
         blitBufferToBufferTrans(
-            gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER],
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER].width,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER].height,
-            gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER].width,
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER].getData(),
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER].getWidth(),
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER].getHeight(),
+            _editorFrmImages[EDITOR_GRAPHIC_SLIDER].getWidth(),
             gCharacterEditorWindowBuffer + 640 * (y + 16) + 592,
             640);
 
@@ -2990,14 +3015,14 @@ static void characterEditorDrawSkills(int a1)
                     gCharacterEditorWindow,
                     614,
                     gCharacterEditorSkillValueAdjustmentSliderY - 7,
-                    gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_PLUS_ON].width,
-                    gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_PLUS_ON].height,
+                    _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getWidth(),
+                    _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getHeight(),
                     -1,
                     522,
                     521,
                     522,
-                    gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_PLUS_OFF],
-                    gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_PLUS_ON],
+                    _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_OFF].getData(),
+                    _editorFrmImages[EDITOR_GRAPHIC_SLIDER_PLUS_ON].getData(),
                     NULL,
                     96);
                 buttonSetCallbacks(gCharacterEditorSliderPlusBtn, _gsound_red_butt_press, NULL);
@@ -3007,15 +3032,15 @@ static void characterEditorDrawSkills(int a1)
                 gCharacterEditorSliderMinusBtn = buttonCreate(
                     gCharacterEditorWindow,
                     614,
-                    gCharacterEditorSkillValueAdjustmentSliderY + 4 - 12 + gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_MINUS_ON].height,
-                    gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_MINUS_ON].width,
-                    gCharacterEditorFrmSize[EDITOR_GRAPHIC_SLIDER_MINUS_OFF].height,
+                    gCharacterEditorSkillValueAdjustmentSliderY + 4 - 12 + _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_ON].getHeight(),
+                    _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_ON].getWidth(),
+                    _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_OFF].getHeight(),
                     -1,
                     524,
                     523,
                     524,
-                    gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_MINUS_OFF],
-                    gCharacterEditorFrmData[EDITOR_GRAPHIC_SLIDER_MINUS_ON],
+                    _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_OFF].getData(),
+                    _editorFrmImages[EDITOR_GRAPHIC_SLIDER_MINUS_ON].getData(),
                     NULL,
                     96);
                 buttonSetCallbacks(gCharacterEditorSliderMinusBtn, _gsound_red_butt_press, NULL);
@@ -3035,7 +3060,7 @@ static void characterEditorDrawCard()
         return;
     }
 
-    blitBufferToBuffer(gCharacterEditorWindowBackgroundBuffer + (640 * 267) + 345, 277, 170, 640, gCharacterEditorWindowBuffer + (267 * 640) + 345, 640);
+    blitBufferToBuffer(_editorBackgroundFrmImage.getData() + (640 * 267) + 345, 277, 170, 640, gCharacterEditorWindowBuffer + (267 * 640) + 345, 640);
 
     if (characterEditorSelectedItem >= 0 && characterEditorSelectedItem < 7) {
         description = statGetDescription(characterEditorSelectedItem);
@@ -3132,7 +3157,7 @@ static void characterEditorDrawCard()
         char formatted[150]; // TODO: Size is probably wrong.
         const char* base = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 137);
         int defaultValue = skillGetDefaultValue(skill);
-        sprintf(formatted, "%s %d%% %s", base, defaultValue, attributesDescription);
+        snprintf(formatted, sizeof(formatted), "%s %d%% %s", base, defaultValue, attributesDescription);
 
         graphicId = skillGetFrmId(skill);
         title = skillGetName(skill);
@@ -3174,12 +3199,12 @@ static int characterEditorEditName()
 {
     char* text;
 
-    int windowWidth = gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].width;
-    int windowHeight = gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].height;
+    int windowWidth = _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getWidth();
+    int windowHeight = _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getHeight();
 
     int nameWindowX = (screenGetWidth() - EDITOR_WINDOW_WIDTH) / 2 + 17;
     int nameWindowY = (screenGetHeight() - EDITOR_WINDOW_HEIGHT) / 2;
-    int win = windowCreate(nameWindowX, nameWindowY, windowWidth, windowHeight, 256, WINDOW_FLAG_0x10 | WINDOW_FLAG_0x02);
+    int win = windowCreate(nameWindowX, nameWindowY, windowWidth, windowHeight, 256, WINDOW_MODAL | WINDOW_DONT_MOVE_TOP);
     if (win == -1) {
         return -1;
     }
@@ -3187,19 +3212,19 @@ static int characterEditorEditName()
     unsigned char* windowBuf = windowGetBuffer(win);
 
     // Copy background
-    memcpy(windowBuf, gCharacterEditorFrmData[EDITOR_GRAPHIC_CHARWIN], windowWidth * windowHeight);
+    memcpy(windowBuf, _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getData(), windowWidth * windowHeight);
 
     blitBufferToBufferTrans(
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_NAME_BOX],
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_BOX].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_BOX].height,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_BOX].width,
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_BOX].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_BOX].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_BOX].getHeight(),
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_BOX].getWidth(),
         windowBuf + windowWidth * 13 + 13,
         windowWidth);
-    blitBufferToBufferTrans(gCharacterEditorFrmData[EDITOR_GRAPHIC_DONE_BOX],
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_DONE_BOX].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_DONE_BOX].height,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_DONE_BOX].width,
+    blitBufferToBufferTrans(_editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getHeight(),
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getWidth(),
         windowBuf + windowWidth * 40 + 13,
         windowWidth);
 
@@ -3211,14 +3236,14 @@ static int characterEditorEditName()
     int doneBtn = buttonCreate(win,
         26,
         44,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].height,
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getHeight(),
         -1,
         -1,
         -1,
         500,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN],
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (doneBtn != -1) {
@@ -3253,14 +3278,14 @@ static int characterEditorEditName()
     // NOTE: original code is a bit different, the following chunk of code written two times.
 
     fontSetCurrent(101);
-    blitBufferToBuffer(gCharacterEditorFrmData[EDITOR_GRAPHIC_NAME_BOX],
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_BOX].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_BOX].height,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_BOX].width,
-        windowBuf + gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].width * 13 + 13,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].width);
+    blitBufferToBuffer(_editorFrmImages[EDITOR_GRAPHIC_NAME_BOX].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_BOX].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_BOX].getHeight(),
+        _editorFrmImages[EDITOR_GRAPHIC_NAME_BOX].getWidth(),
+        windowBuf + _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getWidth() * 13 + 13,
+        _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getWidth());
 
-    _PrintName(windowBuf, gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].width);
+    _PrintName(windowBuf, _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getWidth());
 
     strcpy(nameCopy, name);
 
@@ -3306,34 +3331,34 @@ static int characterEditorEditAge()
 
     int savedAge = critterGetStat(gDude, STAT_AGE);
 
-    windowWidth = gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].width;
-    windowHeight = gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].height;
+    windowWidth = _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getWidth();
+    windowHeight = _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getHeight();
 
-    int ageWindowX = (screenGetWidth() - EDITOR_WINDOW_WIDTH) / 2 + gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].width + 9;
+    int ageWindowX = (screenGetWidth() - EDITOR_WINDOW_WIDTH) / 2 + _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getWidth() + 9;
     int ageWindowY = (screenGetHeight() - EDITOR_WINDOW_HEIGHT) / 2;
-    win = windowCreate(ageWindowX, ageWindowY, windowWidth, windowHeight, 256, WINDOW_FLAG_0x10 | WINDOW_FLAG_0x02);
+    win = windowCreate(ageWindowX, ageWindowY, windowWidth, windowHeight, 256, WINDOW_MODAL | WINDOW_DONT_MOVE_TOP);
     if (win == -1) {
         return -1;
     }
 
     windowBuf = windowGetBuffer(win);
 
-    memcpy(windowBuf, gCharacterEditorFrmData[EDITOR_GRAPHIC_CHARWIN], windowWidth * windowHeight);
+    memcpy(windowBuf, _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getData(), windowWidth * windowHeight);
 
     blitBufferToBufferTrans(
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_AGE_BOX],
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_BOX].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_BOX].height,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_BOX].width,
+        _editorFrmImages[EDITOR_GRAPHIC_AGE_BOX].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_AGE_BOX].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_AGE_BOX].getHeight(),
+        _editorFrmImages[EDITOR_GRAPHIC_AGE_BOX].getWidth(),
         windowBuf + windowWidth * 7 + 8,
         windowWidth);
     blitBufferToBufferTrans(
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_DONE_BOX],
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_DONE_BOX].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_DONE_BOX].height,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_DONE_BOX].width,
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getHeight(),
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getWidth(),
         windowBuf + windowWidth * 40 + 13,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].width);
+        _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getWidth());
 
     fontSetCurrent(103);
 
@@ -3346,14 +3371,14 @@ static int characterEditorEditAge()
     doneBtn = buttonCreate(win,
         26,
         44,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].height,
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getHeight(),
         -1,
         -1,
         -1,
         500,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN],
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (doneBtn != -1) {
@@ -3363,14 +3388,14 @@ static int characterEditorEditAge()
     nextBtn = buttonCreate(win,
         105,
         13,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LEFT_ARROW_DOWN].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LEFT_ARROW_DOWN].height,
+        _editorFrmImages[EDITOR_GRAPHIC_LEFT_ARROW_DOWN].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_LEFT_ARROW_DOWN].getHeight(),
         -1,
         503,
         501,
         503,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_RIGHT_ARROW_UP],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_RIGHT_ARROW_DOWN],
+        _editorFrmImages[EDITOR_GRAPHIC_RIGHT_ARROW_UP].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_RIGHT_ARROW_DOWN].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (nextBtn != -1) {
@@ -3380,14 +3405,14 @@ static int characterEditorEditAge()
     prevBtn = buttonCreate(win,
         19,
         13,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_RIGHT_ARROW_DOWN].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_RIGHT_ARROW_DOWN].height,
+        _editorFrmImages[EDITOR_GRAPHIC_RIGHT_ARROW_DOWN].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_RIGHT_ARROW_DOWN].getHeight(),
         -1,
         504,
         502,
         504,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LEFT_ARROW_UP],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LEFT_ARROW_DOWN],
+        _editorFrmImages[EDITOR_GRAPHIC_LEFT_ARROW_UP].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_LEFT_ARROW_DOWN].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (prevBtn != -1) {
@@ -3395,12 +3420,14 @@ static int characterEditorEditAge()
     }
 
     while (true) {
-        _frame_time = _get_time();
+        sharedFpsLimiter.mark();
+
+        _frame_time = getTicks();
         change = 0;
         flags = 0;
         int v32 = 0;
 
-        keyCode = _get_input();
+        keyCode = inputGetInput();
 
         if (keyCode == KEY_RETURN || keyCode == 500) {
             if (keyCode != 500) {
@@ -3458,7 +3485,9 @@ static int characterEditorEditAge()
             _repFtime = 4;
 
             while (true) {
-                _frame_time = _get_time();
+                sharedFpsLimiter.mark();
+
+                _frame_time = getTicks();
 
                 v33++;
 
@@ -3508,10 +3537,13 @@ static int characterEditorEditAge()
                         ;
                 }
 
-                keyCode = _get_input();
+                keyCode = inputGetInput();
                 if (keyCode == 503 || keyCode == 504 || _game_user_wants_to_quit != 0) {
                     break;
                 }
+
+                renderPresent();
+                sharedFpsLimiter.throttle();
             }
         } else {
             windowRefresh(win);
@@ -3519,6 +3551,9 @@ static int characterEditorEditAge()
             while (getTicksSince(_frame_time) < 1000 / 24)
                 ;
         }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
     }
 
     critterSetBaseStat(gDude, STAT_AGE, savedAge);
@@ -3536,14 +3571,14 @@ static void characterEditorEditGender()
 {
     char* text;
 
-    int windowWidth = gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].width;
-    int windowHeight = gCharacterEditorFrmSize[EDITOR_GRAPHIC_CHARWIN].height;
+    int windowWidth = _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getWidth();
+    int windowHeight = _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getHeight();
 
     int genderWindowX = (screenGetWidth() - EDITOR_WINDOW_WIDTH) / 2 + 9
-        + gCharacterEditorFrmSize[EDITOR_GRAPHIC_NAME_ON].width
-        + gCharacterEditorFrmSize[EDITOR_GRAPHIC_AGE_ON].width;
+        + _editorFrmImages[EDITOR_GRAPHIC_NAME_ON].getWidth()
+        + _editorFrmImages[EDITOR_GRAPHIC_AGE_ON].getWidth();
     int genderWindowY = (screenGetHeight() - EDITOR_WINDOW_HEIGHT) / 2;
-    int win = windowCreate(genderWindowX, genderWindowY, windowWidth, windowHeight, 256, WINDOW_FLAG_0x10 | WINDOW_FLAG_0x02);
+    int win = windowCreate(genderWindowX, genderWindowY, windowWidth, windowHeight, 256, WINDOW_MODAL | WINDOW_DONT_MOVE_TOP);
 
     if (win == -1) {
         return;
@@ -3552,12 +3587,12 @@ static void characterEditorEditGender()
     unsigned char* windowBuf = windowGetBuffer(win);
 
     // Copy background
-    memcpy(windowBuf, gCharacterEditorFrmData[EDITOR_GRAPHIC_CHARWIN], windowWidth * windowHeight);
+    memcpy(windowBuf, _editorFrmImages[EDITOR_GRAPHIC_CHARWIN].getData(), windowWidth * windowHeight);
 
-    blitBufferToBufferTrans(gCharacterEditorFrmData[EDITOR_GRAPHIC_DONE_BOX],
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_DONE_BOX].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_DONE_BOX].height,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_DONE_BOX].width,
+    blitBufferToBufferTrans(_editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getHeight(),
+        _editorFrmImages[EDITOR_GRAPHIC_DONE_BOX].getWidth(),
         windowBuf + windowWidth * 44 + 15,
         windowWidth);
 
@@ -3569,14 +3604,14 @@ static void characterEditorEditGender()
     int doneBtn = buttonCreate(win,
         28,
         48,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].height,
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getHeight(),
         -1,
         -1,
         -1,
         500,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN],
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (doneBtn != -1) {
@@ -3587,14 +3622,14 @@ static void characterEditorEditGender()
     btns[0] = buttonCreate(win,
         22,
         2,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_MALE_ON].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_MALE_ON].height,
+        _editorFrmImages[EDITOR_GRAPHIC_MALE_ON].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_MALE_ON].getHeight(),
         -1,
         -1,
         501,
         -1,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_MALE_OFF],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_MALE_ON],
+        _editorFrmImages[EDITOR_GRAPHIC_MALE_OFF].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_MALE_ON].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT | BUTTON_FLAG_0x04 | BUTTON_FLAG_0x02 | BUTTON_FLAG_0x01);
     if (btns[0] != -1) {
@@ -3604,14 +3639,14 @@ static void characterEditorEditGender()
     btns[1] = buttonCreate(win,
         71,
         3,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_FEMALE_ON].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_FEMALE_ON].height,
+        _editorFrmImages[EDITOR_GRAPHIC_FEMALE_ON].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_FEMALE_ON].getHeight(),
         -1,
         -1,
         502,
         -1,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_FEMALE_OFF],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_FEMALE_ON],
+        _editorFrmImages[EDITOR_GRAPHIC_FEMALE_OFF].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_FEMALE_ON].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT | BUTTON_FLAG_0x04 | BUTTON_FLAG_0x02 | BUTTON_FLAG_0x01);
     if (btns[1] != -1) {
@@ -3623,9 +3658,11 @@ static void characterEditorEditGender()
     _win_set_button_rest_state(btns[savedGender], 1, 0);
 
     while (true) {
-        _frame_time = _get_time();
+        sharedFpsLimiter.mark();
 
-        int eventCode = _get_input();
+        _frame_time = getTicks();
+
+        int eventCode = inputGetInput();
 
         if (eventCode == KEY_RETURN || eventCode == 500) {
             if (eventCode == KEY_RETURN) {
@@ -3664,6 +3701,9 @@ static void characterEditorEditGender()
 
         while (getTicksSince(_frame_time) < 41)
             ;
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
     }
 
     characterEditorDrawGender();
@@ -3688,7 +3728,9 @@ static void characterEditorAdjustPrimaryStat(int eventCode)
 
     bool cont = true;
     do {
-        _frame_time = _get_time();
+        sharedFpsLimiter.mark();
+
+        _frame_time = getTicks();
         if (v11 <= 19.2) {
             v11++;
         }
@@ -3743,7 +3785,10 @@ static void characterEditorAdjustPrimaryStat(int eventCode)
             while (getTicksSince(_frame_time) < 1000 / 24) {
             }
         }
-    } while (_get_input() != 518 && cont);
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    } while (inputGetInput() != 518 && cont);
 
     characterEditorDrawCard();
 }
@@ -3753,8 +3798,8 @@ static void characterEditorAdjustPrimaryStat(int eventCode)
 // 0x437C08
 static int characterEditorShowOptions()
 {
-    int width = gCharacterEditorFrmSize[43].width;
-    int height = gCharacterEditorFrmSize[43].height;
+    int width = _editorFrmImages[43].getWidth();
+    int height = _editorFrmImages[43].getHeight();
 
     // NOTE: The following is a block of general purpose string buffers used in
     // this function. They are either store path, or strings from .msg files. I
@@ -3775,18 +3820,18 @@ static int characterEditorShowOptions()
 
     if (gCharacterEditorIsCreationMode) {
         int optionsWindowX = (screenGetWidth() != 640)
-            ? (screenGetWidth() - gCharacterEditorFrmSize[41].width) / 2
+            ? (screenGetWidth() - _editorFrmImages[41].getWidth()) / 2
             : 238;
         int optionsWindowY = (screenGetHeight() != 480)
-            ? (screenGetHeight() - gCharacterEditorFrmSize[41].height) / 2
+            ? (screenGetHeight() - _editorFrmImages[41].getHeight()) / 2
             : 90;
-        int win = windowCreate(optionsWindowX, optionsWindowY, gCharacterEditorFrmSize[41].width, gCharacterEditorFrmSize[41].height, 256, WINDOW_FLAG_0x10 | WINDOW_FLAG_0x02);
+        int win = windowCreate(optionsWindowX, optionsWindowY, _editorFrmImages[41].getWidth(), _editorFrmImages[41].getHeight(), 256, WINDOW_MODAL | WINDOW_DONT_MOVE_TOP);
         if (win == -1) {
             return -1;
         }
 
         unsigned char* windowBuffer = windowGetBuffer(win);
-        memcpy(windowBuffer, gCharacterEditorFrmData[41], gCharacterEditorFrmSize[41].width * gCharacterEditorFrmSize[41].height);
+        memcpy(windowBuffer, _editorFrmImages[41].getData(), _editorFrmImages[41].getWidth() * _editorFrmImages[41].getHeight());
 
         fontSetCurrent(103);
 
@@ -3815,8 +3860,8 @@ static int characterEditorShowOptions()
                     break;
                 }
 
-                memcpy(down[index], gCharacterEditorFrmData[43], size);
-                memcpy(up[index], gCharacterEditorFrmData[42], size);
+                memcpy(down[index], _editorFrmImages[43].getData(), size);
+                memcpy(up[index], _editorFrmImages[42].getData(), size);
 
                 strcpy(string4, getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 600 + index));
 
@@ -3850,7 +3895,9 @@ static int characterEditorShowOptions()
 
         int rc = 0;
         while (rc == 0) {
-            int keyCode = _get_input();
+            sharedFpsLimiter.mark();
+
+            int keyCode = inputGetInput();
 
             if (_game_user_wants_to_quit != 0) {
                 rc = 2;
@@ -3922,9 +3969,9 @@ static int characterEditorShowOptions()
                         string4[0] = '\0';
                         strcat(string4, string1);
 
-                        if (!characterFileExists(string4)) {
+                        if (characterFileExists(string4)) {
                             // already exists
-                            sprintf(string4,
+                            snprintf(string4, sizeof(string4),
                                 "%s %s",
                                 compat_strupr(string1),
                                 getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 609));
@@ -3945,7 +3992,7 @@ static int characterEditorShowOptions()
                             strcat(string4, string1);
 
                             if (characterPrintToFile(string4) == 0) {
-                                sprintf(string4,
+                                snprintf(string4, sizeof(string4),
                                     "%s%s",
                                     compat_strupr(string1),
                                     getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 607));
@@ -3953,7 +4000,7 @@ static int characterEditorShowOptions()
                             } else {
                                 soundPlayFile("iisxxxx1");
 
-                                sprintf(string4,
+                                snprintf(string4, sizeof(string4),
                                     "%s%s%s",
                                     getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 611),
                                     compat_strupr(string1),
@@ -4086,7 +4133,7 @@ static int characterEditorShowOptions()
 
                         bool shouldSave;
                         if (characterFileExists(string4)) {
-                            sprintf(string4, "%s %s",
+                            snprintf(string4, sizeof(string4), "%s %s",
                                 compat_strupr(string1),
                                 getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 609));
                             strcpy(string5, getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 610));
@@ -4109,13 +4156,13 @@ static int characterEditorShowOptions()
 
                             if (gcdSave(string4) != 0) {
                                 soundPlayFile("iisxxxx1");
-                                sprintf(string4, "%s%s!",
+                                snprintf(string4, sizeof(string4), "%s%s!",
                                     compat_strupr(string1),
                                     getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 611));
                                 showDialogBox(string4, NULL, 0, 169, 126, _colorTable[32328], NULL, _colorTable[32328], DIALOG_BOX_LARGE);
                                 rc = 0;
                             } else {
-                                sprintf(string4, "%s%s",
+                                snprintf(string4, sizeof(string4), "%s%s",
                                     compat_strupr(string1),
                                     getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 607));
                                 showDialogBox(string4, NULL, 0, 169, 126, _colorTable[992], NULL, _colorTable[992], DIALOG_BOX_LARGE);
@@ -4137,6 +4184,9 @@ static int characterEditorShowOptions()
             }
 
             windowRefresh(win);
+
+            renderPresent();
+            sharedFpsLimiter.throttle();
         }
 
         windowDestroy(win);
@@ -4181,7 +4231,7 @@ static int characterEditorShowOptions()
 
         int v42 = 0;
         if (characterFileExists(title)) {
-            sprintf(title,
+            snprintf(title, sizeof(title),
                 "%s %s",
                 compat_strupr(fileName),
                 getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 609));
@@ -4205,7 +4255,7 @@ static int characterEditorShowOptions()
             if (characterPrintToFile(title) != 0) {
                 soundPlayFile("iisxxxx1");
 
-                sprintf(title,
+                snprintf(title, sizeof(title),
                     "%s%s%s",
                     getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 611),
                     compat_strupr(fileName),
@@ -4253,7 +4303,7 @@ static int characterPrintToFile(const char* fileName)
 
     // NOTE: Uninline.
     padding[0] = '\0';
-    _AddSpaces(padding, (80 - strlen(title1)) / 2 - 2);
+    _AddSpaces(padding, (80 - static_cast<int>(strlen(title1))) / 2 - 2);
 
     strcat(padding, title1);
     strcat(padding, "\n");
@@ -4264,7 +4314,7 @@ static int characterPrintToFile(const char* fileName)
 
     // NOTE: Uninline.
     padding[0] = '\0';
-    _AddSpaces(padding, (80 - strlen(title1)) / 2 - 2);
+    _AddSpaces(padding, (80 - static_cast<int>(strlen(title1))) / 2 - 2);
 
     strcat(padding, title1);
     strcat(padding, "\n");
@@ -4275,7 +4325,7 @@ static int characterPrintToFile(const char* fileName)
     int year;
     gameTimeGetDate(&month, &day, &year);
 
-    sprintf(title1, "%.2d %s %d  %.4d %s",
+    snprintf(title1, sizeof(title1), "%.2d %s %d  %.4d %s",
         day,
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 500 + month - 1),
         year,
@@ -4284,7 +4334,7 @@ static int characterPrintToFile(const char* fileName)
 
     // NOTE: Uninline.
     padding[0] = '\0';
-    _AddSpaces(padding, (80 - strlen(title1)) / 2 - 2);
+    _AddSpaces(padding, (80 - static_cast<int>(strlen(title1))) / 2 - 2);
 
     strcat(padding, title1);
     strcat(padding, "\n");
@@ -4294,12 +4344,12 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // Name
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %s",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 642),
         critterGetName(gDude));
 
-    int paddingLength = 27 - strlen(title1);
+    int paddingLength = 27 - static_cast<int>(strlen(title1));
     if (paddingLength > 0) {
         // NOTE: Uninline.
         padding[0] = '\0';
@@ -4309,14 +4359,14 @@ static int characterPrintToFile(const char* fileName)
     }
 
     // Age
-    sprintf(title2,
+    snprintf(title2, sizeof(title2),
         "%s%s %d",
         title1,
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 643),
         critterGetStat(gDude, STAT_AGE));
 
     // Gender
-    sprintf(title3,
+    snprintf(title3, sizeof(title3),
         "%s%s %s",
         title2,
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 644),
@@ -4325,14 +4375,14 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString(title3, stream);
     fileWriteString("\n", stream);
 
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %.2d %s %s ",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 647),
         pcGetStat(PC_STAT_LEVEL),
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 648),
         _itostndn(pcGetStat(PC_STAT_EXPERIENCE), title3));
 
-    paddingLength = 12 - strlen(title3);
+    paddingLength = 12 - static_cast<int>(strlen(title3));
     if (paddingLength > 0) {
         // NOTE: Uninline.
         padding[0] = '\0';
@@ -4341,7 +4391,7 @@ static int characterPrintToFile(const char* fileName)
         strcat(title1, padding);
     }
 
-    sprintf(title2,
+    snprintf(title2, sizeof(title2),
         "%s%s %s",
         title1,
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 649),
@@ -4351,12 +4401,12 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // Statistics
-    sprintf(title1, "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 623));
+    snprintf(title1, sizeof(title1), "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 623));
 
     // Strength / Hit Points / Sequence
     //
     // FIXME: There is bug - it shows strength instead of sequence.
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %.2d %s %.3d/%.3d %s %.2d",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 624),
         critterGetStat(gDude, STAT_STRENGTH),
@@ -4369,7 +4419,7 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // Perception / Armor Class / Healing Rate
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %.2d %s %.3d %s %.2d",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 627),
         critterGetStat(gDude, STAT_PERCEPTION),
@@ -4381,7 +4431,7 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // Endurance / Action Points / Critical Chance
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %.2d %s %.2d %s %.3d%%",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 630),
         critterGetStat(gDude, STAT_ENDURANCE),
@@ -4392,20 +4442,26 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString(title1, stream);
     fileWriteString("\n", stream);
 
+    // SFALL: Display melee damage without "Bonus HtH Damage" bonus.
+    int meleeDamage = critterGetStat(gDude, STAT_MELEE_DAMAGE);
+    if (!damageModGetDisplayBonusDamage()) {
+        meleeDamage -= 2 * perkGetRank(gDude, PERK_BONUS_HTH_DAMAGE);
+    }
+
     // Charisma / Melee Damage / Carry Weight
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %.2d %s %.2d %s %.3d lbs.",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 633),
         critterGetStat(gDude, STAT_CHARISMA),
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 634),
-        critterGetStat(gDude, STAT_MELEE_DAMAGE),
+        meleeDamage,
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 635),
         critterGetStat(gDude, STAT_CARRY_WEIGHT));
     fileWriteString(title1, stream);
     fileWriteString("\n", stream);
 
     // Intelligence / Damage Resistance
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %.2d %s %.3d%%",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 636),
         critterGetStat(gDude, STAT_INTELLIGENCE),
@@ -4415,7 +4471,7 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // Agility / Radiation Resistance
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %.2d %s %.3d%%",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 638),
         critterGetStat(gDude, STAT_AGILITY),
@@ -4425,7 +4481,7 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // Luck / Poison Resistance
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %.2d %s %.3d%%",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 640),
         critterGetStat(gDude, STAT_LUCK),
@@ -4439,13 +4495,13 @@ static int characterPrintToFile(const char* fileName)
 
     if (gCharacterEditorTempTraits[0] != -1) {
         // ::: Traits :::
-        sprintf(title1, "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 650));
+        snprintf(title1, sizeof(title1), "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 650));
         fileWriteString(title1, stream);
 
         // NOTE: The original code does not use loop, or it was optimized away.
         for (int index = 0; index < TRAITS_MAX_SELECTED_COUNT; index++) {
             if (gCharacterEditorTempTraits[index] != -1) {
-                sprintf(title1, "  %s", traitGetName(gCharacterEditorTempTraits[index]));
+                snprintf(title1, sizeof(title1), "  %s", traitGetName(gCharacterEditorTempTraits[index]));
                 fileWriteString(title1, stream);
                 fileWriteString("\n", stream);
             }
@@ -4461,16 +4517,16 @@ static int characterPrintToFile(const char* fileName)
 
     if (perk < PERK_COUNT) {
         // ::: Perks :::
-        sprintf(title1, "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 651));
+        snprintf(title1, sizeof(title1), "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 651));
         fileWriteString(title1, stream);
 
         for (perk = 0; perk < PERK_COUNT; perk++) {
             int rank = perkGetRank(gDude, perk);
             if (rank != 0) {
                 if (rank == 1) {
-                    sprintf(title1, "  %s", perkGetName(perk));
+                    snprintf(title1, sizeof(title1), "  %s", perkGetName(perk));
                 } else {
-                    sprintf(title1, "  %s (%d)", perkGetName(perk), rank);
+                    snprintf(title1, sizeof(title1), "  %s (%d)", perkGetName(perk), rank);
                 }
 
                 fileWriteString(title1, stream);
@@ -4482,7 +4538,7 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // ::: Karma :::
-    sprintf(title1, "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 652));
+    snprintf(title1, sizeof(title1), "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 652));
     fileWriteString(title1, stream);
 
     for (int index = 0; index < gKarmaEntriesLength; index++) {
@@ -4498,7 +4554,7 @@ static int characterPrintToFile(const char* fileName)
 
             if (reputation < gGenericReputationEntriesLength) {
                 GenericReputationEntry* reputationDescription = &(gGenericReputationEntries[reputation]);
-                sprintf(title1,
+                snprintf(title1, sizeof(title1),
                     "  %s: %s (%s)",
                     getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 125),
                     compat_itoa(gGameGlobalVars[GVAR_PLAYER_REPUTATION], title2, 10),
@@ -4508,7 +4564,7 @@ static int characterPrintToFile(const char* fileName)
             }
         } else {
             if (gGameGlobalVars[karmaEntry->gvar] != 0) {
-                sprintf(title1, "  %s", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, karmaEntry->name));
+                snprintf(title1, sizeof(title1), "  %s", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, karmaEntry->name));
                 fileWriteString(title1, stream);
                 fileWriteString("\n", stream);
             }
@@ -4516,19 +4572,20 @@ static int characterPrintToFile(const char* fileName)
     }
 
     bool hasTownReputationHeading = false;
-    for (int index = 0; index < TOWN_REPUTATION_COUNT; index++) {
-        const TownReputationEntry* pair = &(gTownReputationEntries[index]);
-        if (_wmAreaIsKnown(pair->city)) {
+    // SFALL
+    for (int index = 0; index < gCustomTownReputationEntries.size(); index++) {
+        const TownReputationEntry* pair = &(gCustomTownReputationEntries[index]);
+        if (wmAreaIsKnown(pair->city)) {
             if (!hasTownReputationHeading) {
                 fileWriteString("\n", stream);
 
                 // ::: Reputation :::
-                sprintf(title1, "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 657));
+                snprintf(title1, sizeof(title1), "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 657));
                 fileWriteString(title1, stream);
                 hasTownReputationHeading = true;
             }
 
-            _wmGetAreaIdxName(pair->city, title2);
+            wmGetAreaIdxName(pair->city, title2);
 
             int townReputation = gGameGlobalVars[pair->gvar];
 
@@ -4550,7 +4607,7 @@ static int characterPrintToFile(const char* fileName)
                 townReputationMessageId = 2000; // Idolized
             }
 
-            sprintf(title1,
+            snprintf(title1, sizeof(title1),
                 "  %s: %s",
                 title2,
                 getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, townReputationMessageId));
@@ -4566,12 +4623,12 @@ static int characterPrintToFile(const char* fileName)
                 fileWriteString("\n", stream);
 
                 // ::: Addictions :::
-                sprintf(title1, "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 656));
+                snprintf(title1, sizeof(title1), "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 656));
                 fileWriteString(title1, stream);
                 hasAddictionsHeading = true;
             }
 
-            sprintf(title1,
+            snprintf(title1, sizeof(title1),
                 "  %s",
                 getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 1004 + index));
             fileWriteString(title1, stream);
@@ -4582,27 +4639,27 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // ::: Skills ::: / ::: Kills :::
-    sprintf(title1, "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 653));
+    snprintf(title1, sizeof(title1), "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 653));
     fileWriteString(title1, stream);
 
     int killType = 0;
     for (int skill = 0; skill < SKILL_COUNT; skill++) {
-        sprintf(title1, "%s ", skillGetName(skill));
+        snprintf(title1, sizeof(title1), "%s ", skillGetName(skill));
 
         // NOTE: Uninline.
-        _AddDots(title1 + strlen(title1), 16 - strlen(title1));
+        _AddDots(title1 + strlen(title1), 16 - static_cast<int>(strlen(title1)));
 
         bool hasKillType = false;
 
         for (; killType < KILL_TYPE_COUNT; killType++) {
             int killsCount = killsGetByType(killType);
             if (killsCount > 0) {
-                sprintf(title2, "%s ", killTypeGetName(killType));
+                snprintf(title2, sizeof(title2), "%s ", killTypeGetName(killType));
 
                 // NOTE: Uninline.
-                _AddDots(title2 + strlen(title2), 16 - strlen(title2));
+                _AddDots(title2 + strlen(title2), 16 - static_cast<int>(strlen(title2)));
 
-                sprintf(title3,
+                snprintf(title3, sizeof(title3),
                     "  %s %.3d%%        %s %.3d\n",
                     title1,
                     skillGetValue(gDude, skill),
@@ -4614,7 +4671,7 @@ static int characterPrintToFile(const char* fileName)
         }
 
         if (!hasKillType) {
-            sprintf(title3,
+            snprintf(title3, sizeof(title3),
                 "  %s %.3d%%\n",
                 title1,
                 skillGetValue(gDude, skill));
@@ -4625,7 +4682,7 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // ::: Inventory :::
-    sprintf(title1, "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 654));
+    snprintf(title1, sizeof(title1), "%s\n", getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 654));
     fileWriteString(title1, stream);
 
     Inventory* inventory = &(gDude->data.inventory);
@@ -4640,12 +4697,12 @@ static int characterPrintToFile(const char* fileName)
 
             InventoryItem* inventoryItem = &(inventory->items[inventoryItemIndex]);
 
-            sprintf(title2,
+            snprintf(title2, sizeof(title2),
                 "  %sx %s",
                 _itostndn(inventoryItem->quantity, title3),
                 objectGetName(inventoryItem->item));
 
-            int length = 25 - strlen(title2);
+            int length = 25 - static_cast<int>(strlen(title2));
             if (length < 0) {
                 length = 0;
             }
@@ -4662,7 +4719,7 @@ static int characterPrintToFile(const char* fileName)
     fileWriteString("\n", stream);
 
     // Total Weight:
-    sprintf(title1,
+    snprintf(title1, sizeof(title1),
         "%s %d lbs.",
         getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 655),
         objectGetInventoryWeight(gDude));
@@ -4881,39 +4938,33 @@ static char* _itostndn(int value, char* dest)
 // 0x43AAEC
 static int characterEditorDrawCardWithOptions(int graphicId, const char* name, const char* attributes, char* description)
 {
-    CacheEntry* graphicHandle;
-    Size size;
-    int fid;
-    unsigned char* buf;
-    unsigned char* ptr;
-    int v9;
-    int x;
-    int y;
-    short beginnings[WORD_WRAP_MAX_COUNT];
-    short beginningsCount;
-
-    fid = buildFid(10, graphicId, 0, 0, 0);
-    buf = artLockFrameDataReturningSize(fid, &graphicHandle, &(size.width), &(size.height));
-    if (buf == NULL) {
+    FrmImage frmImage;
+    int fid = buildFid(OBJ_TYPE_SKILLDEX, graphicId, 0, 0, 0);
+    if (!frmImage.lock(fid)) {
         return -1;
     }
 
-    blitBufferToBuffer(buf, size.width, size.height, size.width, gCharacterEditorWindowBuffer + 640 * 309 + 484, 640);
+    blitBufferToBuffer(frmImage.getData(),
+        frmImage.getWidth(),
+        frmImage.getHeight(),
+        frmImage.getWidth(),
+        gCharacterEditorWindowBuffer + 640 * 309 + 484,
+        640);
 
-    v9 = 150;
-    ptr = buf;
-    for (y = 0; y < size.height; y++) {
-        for (x = 0; x < size.width; x++) {
-            if (_HighRGB_(*ptr) < 2 && v9 >= x) {
-                v9 = x;
+    int extraDescriptionWidth = 150;
+    unsigned char* data = frmImage.getData();
+    for (int y = 0; y < frmImage.getHeight(); y++) {
+        for (int x = 0; x < frmImage.getWidth(); x++) {
+            if (HighRGB(*data) < 2) {
+                extraDescriptionWidth = std::min(extraDescriptionWidth, x);
             }
-            ptr++;
+            data++;
         }
     }
 
-    v9 -= 8;
-    if (v9 < 0) {
-        v9 = 0;
+    extraDescriptionWidth -= 8;
+    if (extraDescriptionWidth < 0) {
+        extraDescriptionWidth = 0;
     }
 
     fontSetCurrent(102);
@@ -4928,20 +4979,21 @@ static int characterEditorDrawCardWithOptions(int graphicId, const char* name, c
         fontDrawText(gCharacterEditorWindowBuffer + 640 * (268 + nameFontLineHeight - attributesFontLineHeight) + 348 + nameWidth + 8, attributes, 640, 640, _colorTable[0]);
     }
 
-    y = nameFontLineHeight;
-    windowDrawLine(gCharacterEditorWindow, 348, y + 272, 613, y + 272, _colorTable[0]);
-    windowDrawLine(gCharacterEditorWindow, 348, y + 273, 613, y + 273, _colorTable[0]);
+    windowDrawLine(gCharacterEditorWindow, 348, nameFontLineHeight + 272, 613, nameFontLineHeight + 272, _colorTable[0]);
+    windowDrawLine(gCharacterEditorWindow, 348, nameFontLineHeight + 273, 613, nameFontLineHeight + 273, _colorTable[0]);
 
     fontSetCurrent(101);
 
     int descriptionFontLineHeight = fontGetLineHeight();
 
-    if (wordWrap(description, v9 + 136, beginnings, &beginningsCount) != 0) {
+    short beginnings[WORD_WRAP_MAX_COUNT];
+    short beginningsCount;
+    if (wordWrap(description, extraDescriptionWidth + 136, beginnings, &beginningsCount) != 0) {
         // TODO: Leaking graphic handle.
         return -1;
     }
 
-    y = 315;
+    int y = 315;
     for (short i = 0; i < beginningsCount - 1; i++) {
         short beginning = beginnings[i];
         short ending = beginnings[i + 1];
@@ -4961,8 +5013,6 @@ static int characterEditorDrawCardWithOptions(int graphicId, const char* name, c
     strcpy(gCharacterEditorCardTitle, name);
     gCharacterEditorCardFrmId = graphicId;
     gCharacterEditorCardDrawn = true;
-
-    artUnlock(graphicHandle);
 
     return 0;
 }
@@ -5151,7 +5201,9 @@ static void characterEditorHandleAdjustSkillButtonPressed(int keyCode)
 
     int repeatDelay = 0;
     for (;;) {
-        _frame_time = _get_time();
+        sharedFpsLimiter.mark();
+
+        _frame_time = getTicks();
         if (repeatDelay <= dbl_5018F0) {
             repeatDelay++;
         }
@@ -5170,7 +5222,7 @@ static void characterEditorHandleAdjustSkillButtonPressed(int keyCode)
                     if (skillAdd(gDude, gCharacterEditorCurrentSkill) == -3) {
                         soundPlayFile("iisxxxx1");
 
-                        sprintf(title, "%s:", skillGetName(gCharacterEditorCurrentSkill));
+                        snprintf(title, sizeof(title), "%s:", skillGetName(gCharacterEditorCurrentSkill));
                         // At maximum level.
                         strcpy(body1, getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 132));
                         // Unable to increment it.
@@ -5198,7 +5250,7 @@ static void characterEditorHandleAdjustSkillButtonPressed(int keyCode)
                 if (rc == 0) {
                     soundPlayFile("iisxxxx1");
 
-                    sprintf(title, "%s:", skillGetName(gCharacterEditorCurrentSkill));
+                    snprintf(title, sizeof(title), "%s:", skillGetName(gCharacterEditorCurrentSkill));
                     // At minimum level.
                     strcpy(body1, getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 134));
                     // Unable to decrement it.
@@ -5234,8 +5286,10 @@ static void characterEditorHandleAdjustSkillButtonPressed(int keyCode)
                 }
             }
 
-            int keyCode = _get_input();
+            int keyCode = inputGetInput();
             if (keyCode != 522 && keyCode != 524 && rc != -1) {
+                renderPresent();
+                sharedFpsLimiter.throttle();
                 continue;
             }
         }
@@ -5337,7 +5391,7 @@ static void characterEditorDrawOptionalTraits()
         v0 = characterEditorSelectedItem - 82;
     }
 
-    blitBufferToBuffer(gCharacterEditorWindowBackgroundBuffer + 640 * 353 + 47, 245, 100, 640, gCharacterEditorWindowBuffer + 640 * 353 + 47, 640);
+    blitBufferToBuffer(_editorBackgroundFrmImage.getData() + 640 * 353 + 47, 245, 100, 640, gCharacterEditorWindowBuffer + 640 * 353 + 47, 640);
 
     fontSetCurrent(101);
 
@@ -5475,7 +5529,7 @@ static void characterEditorDrawKarmaFolder()
                 char reputationValue[32];
                 compat_itoa(gGameGlobalVars[GVAR_PLAYER_REPUTATION], reputationValue, 10);
 
-                sprintf(formattedText,
+                snprintf(formattedText, sizeof(formattedText),
                     "%s: %s (%s)",
                     getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 125),
                     reputationValue,
@@ -5504,9 +5558,10 @@ static void characterEditorDrawKarmaFolder()
     }
 
     bool hasTownReputationHeading = false;
-    for (int index = 0; index < TOWN_REPUTATION_COUNT; index++) {
-        const TownReputationEntry* pair = &(gTownReputationEntries[index]);
-        if (_wmAreaIsKnown(pair->city)) {
+    // SFALL
+    for (int index = 0; index < gCustomTownReputationEntries.size(); index++) {
+        const TownReputationEntry* pair = &(gCustomTownReputationEntries[index]);
+        if (wmAreaIsKnown(pair->city)) {
             if (!hasTownReputationHeading) {
                 msg = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 4000);
                 if (characterEditorFolderViewDrawHeading(msg)) {
@@ -5519,7 +5574,7 @@ static void characterEditorDrawKarmaFolder()
             }
 
             char cityShortName[40];
-            _wmGetAreaIdxName(pair->city, cityShortName);
+            wmGetAreaIdxName(pair->city, cityShortName);
 
             int townReputation = gGameGlobalVars[pair->gvar];
 
@@ -5550,7 +5605,7 @@ static void characterEditorDrawKarmaFolder()
             }
 
             msg = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, townReputationBaseMessageId);
-            sprintf(formattedText,
+            snprintf(formattedText, sizeof(formattedText),
                 "%s: %s",
                 cityShortName,
                 msg);
@@ -5704,7 +5759,7 @@ static int characterEditorUpdateLevel()
 static void perkDialogRefreshPerks()
 {
     blitBufferToBuffer(
-        gPerkDialogBackgroundBuffer + 280,
+        _perkDialogBackgroundFrmImage.getData() + 280,
         293,
         PERK_WINDOW_HEIGHT,
         PERK_WINDOW_WIDTH,
@@ -5723,7 +5778,7 @@ static void perkDialogRefreshPerks()
 
     int rank = perkGetRank(gDude, perk);
     if (rank != 0) {
-        sprintf(perkRankBuffer, "(%d)", rank);
+        snprintf(perkRankBuffer, sizeof(perkRankBuffer), "(%d)", rank);
         perkRank = perkRankBuffer;
     }
 
@@ -5741,12 +5796,8 @@ static int perkDialogShow()
     gPerkDialogCardTitle[0] = '\0';
     gPerkDialogCardDrawn = false;
 
-    CacheEntry* backgroundFrmHandle;
-    int backgroundWidth;
-    int backgroundHeight;
-    int fid = buildFid(6, 86, 0, 0, 0);
-    gPerkDialogBackgroundBuffer = artLockFrameDataReturningSize(fid, &backgroundFrmHandle, &backgroundWidth, &backgroundHeight);
-    if (gPerkDialogBackgroundBuffer == NULL) {
+    int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, 86, 0, 0, 0);
+    if (!_perkDialogBackgroundFrmImage.lock(backgroundFid)) {
         debugPrint("\n *** Error running perks dialog window ***\n");
         return -1;
     }
@@ -5758,29 +5809,29 @@ static int perkDialogShow()
     int perkWindowY = screenGetHeight() != 480
         ? (screenGetHeight() - PERK_WINDOW_HEIGHT) / 2
         : PERK_WINDOW_Y;
-    gPerkDialogWindow = windowCreate(perkWindowX, perkWindowY, PERK_WINDOW_WIDTH, PERK_WINDOW_HEIGHT, 256, WINDOW_FLAG_0x10 | WINDOW_FLAG_0x02);
+    gPerkDialogWindow = windowCreate(perkWindowX, perkWindowY, PERK_WINDOW_WIDTH, PERK_WINDOW_HEIGHT, 256, WINDOW_MODAL | WINDOW_DONT_MOVE_TOP);
     if (gPerkDialogWindow == -1) {
-        artUnlock(backgroundFrmHandle);
+        _perkDialogBackgroundFrmImage.unlock();
         debugPrint("\n *** Error running perks dialog window ***\n");
         return -1;
     }
 
     gPerkDialogWindowBuffer = windowGetBuffer(gPerkDialogWindow);
-    memcpy(gPerkDialogWindowBuffer, gPerkDialogBackgroundBuffer, PERK_WINDOW_WIDTH * PERK_WINDOW_HEIGHT);
+    memcpy(gPerkDialogWindowBuffer, _perkDialogBackgroundFrmImage.getData(), PERK_WINDOW_WIDTH * PERK_WINDOW_HEIGHT);
 
     int btn;
 
     btn = buttonCreate(gPerkDialogWindow,
         48,
         186,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].height,
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getHeight(),
         -1,
         -1,
         -1,
         500,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN],
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (btn != -1) {
@@ -5790,14 +5841,14 @@ static int perkDialogShow()
     btn = buttonCreate(gPerkDialogWindow,
         153,
         186,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].height,
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getHeight(),
         -1,
         -1,
         -1,
         502,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN],
+        _editorFrmImages[EDITOR_GRAPHIC_LITTLE_RED_BUTTON_UP].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_LILTTLE_RED_BUTTON_DOWN].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (btn != -1) {
@@ -5807,14 +5858,14 @@ static int perkDialogShow()
     btn = buttonCreate(gPerkDialogWindow,
         25,
         46,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_UP_ARROW_ON].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_UP_ARROW_ON].height,
+        _editorFrmImages[EDITOR_GRAPHIC_UP_ARROW_ON].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_UP_ARROW_ON].getHeight(),
         -1,
         574,
         572,
         574,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_UP_ARROW_OFF],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_UP_ARROW_ON],
+        _editorFrmImages[EDITOR_GRAPHIC_UP_ARROW_OFF].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_UP_ARROW_ON].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (btn != -1) {
@@ -5823,15 +5874,15 @@ static int perkDialogShow()
 
     btn = buttonCreate(gPerkDialogWindow,
         25,
-        47 + gCharacterEditorFrmSize[EDITOR_GRAPHIC_UP_ARROW_ON].height,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_UP_ARROW_ON].width,
-        gCharacterEditorFrmSize[EDITOR_GRAPHIC_UP_ARROW_ON].height,
+        47 + _editorFrmImages[EDITOR_GRAPHIC_UP_ARROW_ON].getHeight(),
+        _editorFrmImages[EDITOR_GRAPHIC_UP_ARROW_ON].getWidth(),
+        _editorFrmImages[EDITOR_GRAPHIC_UP_ARROW_ON].getHeight(),
         -1,
         575,
         573,
         575,
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_DOWN_ARROW_OFF],
-        gCharacterEditorFrmData[EDITOR_GRAPHIC_DOWN_ARROW_ON],
+        _editorFrmImages[EDITOR_GRAPHIC_DOWN_ARROW_OFF].getData(),
+        _editorFrmImages[EDITOR_GRAPHIC_DOWN_ARROW_ON].getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (btn != -1) {
@@ -5880,7 +5931,7 @@ static int perkDialogShow()
 
     int rank = perkGetRank(gDude, perk);
     if (rank != 0) {
-        sprintf(perkRankBuffer, "(%d)", rank);
+        snprintf(perkRankBuffer, sizeof(perkRankBuffer), "(%d)", rank);
         perkRank = perkRankBuffer;
     }
 
@@ -5925,7 +5976,7 @@ static int perkDialogShow()
     characterEditorDrawCard();
     windowRefresh(gCharacterEditorWindow);
 
-    artUnlock(backgroundFrmHandle);
+    _perkDialogBackgroundFrmImage.unlock();
 
     windowDestroy(gPerkDialogWindow);
 
@@ -5947,8 +5998,12 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
 
     int rc = 0;
     while (rc == 0) {
-        int keyCode = _get_input();
+        sharedFpsLimiter.mark();
+
+        int keyCode = inputGetInput();
         int v19 = 0;
+
+        convertMouseWheelToArrowKey(&keyCode);
 
         if (keyCode == 500) {
             rc = 1;
@@ -5956,7 +6011,7 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
             soundPlayFile("ib1p1xx1");
             rc = 1;
         } else if (keyCode == 501) {
-            mouseGetPositionInWindow(gPerkDialogWindow , &gCharacterEditorMouseX, &gCharacterEditorMouseY);
+            mouseGetPositionInWindow(gPerkDialogWindow, &gCharacterEditorMouseX, &gCharacterEditorMouseY);
             gPerkDialogCurrentLine = (gCharacterEditorMouseY - PERK_WINDOW_LIST_Y) / v16;
             if (gPerkDialogCurrentLine >= 0) {
                 if (count - 1 < gPerkDialogCurrentLine)
@@ -6058,7 +6113,9 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
                 gPerkDialogPreviousCurrentLine = -2;
 
                 do {
-                    _frame_time = _get_time();
+                    sharedFpsLimiter.mark();
+
+                    _frame_time = getTicks();
                     if (v19 <= dbl_5019BE) {
                         v19++;
                     }
@@ -6090,7 +6147,10 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
                         while (getTicksSince(_frame_time) < 1000 / _repFtime) {
                         }
                     }
-                } while (_get_input() != 574);
+
+                    renderPresent();
+                    sharedFpsLimiter.throttle();
+                } while (inputGetInput() != 574);
 
                 break;
             case 573:
@@ -6099,7 +6159,9 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
 
                 if (count > 11) {
                     do {
-                        _frame_time = _get_time();
+                        sharedFpsLimiter.mark();
+
+                        _frame_time = getTicks();
                         if (v19 <= dbl_5019BE) {
                             v19++;
                         }
@@ -6132,10 +6194,15 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
                             while (getTicksSince(_frame_time) < 1000 / _repFtime) {
                             }
                         }
-                    } while (_get_input() != 575);
+
+                        renderPresent();
+                        sharedFpsLimiter.throttle();
+                    } while (inputGetInput() != 575);
                 } else {
                     do {
-                        _frame_time = _get_time();
+                        sharedFpsLimiter.mark();
+
+                        _frame_time = getTicks();
                         if (v19 <= dbl_5019BE) {
                             v19++;
                         }
@@ -6163,7 +6230,10 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
                             while (getTicksSince(_frame_time) < 1000 / _repFtime) {
                             }
                         }
-                    } while (_get_input() != 575);
+
+                        renderPresent();
+                        sharedFpsLimiter.throttle();
+                    } while (inputGetInput() != 575);
                 }
                 break;
             case KEY_HOME:
@@ -6184,12 +6254,15 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
                 break;
             default:
                 if (getTicksSince(_frame_time) > 700) {
-                    _frame_time = _get_time();
+                    _frame_time = getTicks();
                     gPerkDialogPreviousCurrentLine = -2;
                 }
                 break;
             }
         }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
     }
 
     return rc;
@@ -6199,7 +6272,7 @@ static int perkDialogHandleInput(int count, void (*refreshProc)())
 static int perkDialogDrawPerks()
 {
     blitBufferToBuffer(
-        gPerkDialogBackgroundBuffer + PERK_WINDOW_WIDTH * 43 + 45,
+        _perkDialogBackgroundFrmImage.getData() + PERK_WINDOW_WIDTH * 43 + 45,
         192,
         129,
         PERK_WINDOW_WIDTH,
@@ -6247,7 +6320,7 @@ static int perkDialogDrawPerks()
 
         if (perkGetRank(gDude, gPerkDialogOptionList[index].value) != 0) {
             char rankString[256];
-            sprintf(rankString, "(%d)", perkGetRank(gDude, gPerkDialogOptionList[index].value));
+            snprintf(rankString, sizeof(rankString), "(%d)", perkGetRank(gDude, gPerkDialogOptionList[index].value));
             fontDrawText(gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * y + 207, rankString, PERK_WINDOW_WIDTH, PERK_WINDOW_WIDTH, color);
         }
 
@@ -6260,7 +6333,12 @@ static int perkDialogDrawPerks()
 // 0x43D2F8
 static void perkDialogRefreshTraits()
 {
-    blitBufferToBuffer(gPerkDialogBackgroundBuffer + 280, 293, PERK_WINDOW_HEIGHT, PERK_WINDOW_WIDTH, gPerkDialogWindowBuffer + 280, PERK_WINDOW_WIDTH);
+    blitBufferToBuffer(_perkDialogBackgroundFrmImage.getData() + 280,
+        293,
+        PERK_WINDOW_HEIGHT,
+        PERK_WINDOW_WIDTH,
+        gPerkDialogWindowBuffer + 280,
+        PERK_WINDOW_WIDTH);
 
     perkDialogDrawTraits(gPerkDialogOptionCount);
 
@@ -6295,7 +6373,12 @@ static bool perkDialogHandleMutatePerk()
     if (gCharacterEditorTempTraitCount >= 1) {
         fontSetCurrent(103);
 
-        blitBufferToBuffer(gPerkDialogBackgroundBuffer + PERK_WINDOW_WIDTH * 14 + 49, 206, fontGetLineHeight() + 2, PERK_WINDOW_WIDTH, gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 15 + 49, PERK_WINDOW_WIDTH);
+        blitBufferToBuffer(_perkDialogBackgroundFrmImage.getData() + PERK_WINDOW_WIDTH * 14 + 49,
+            206,
+            fontGetLineHeight() + 2,
+            PERK_WINDOW_WIDTH,
+            gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 15 + 49,
+            PERK_WINDOW_WIDTH);
 
         // LOSE A TRAIT
         char* msg = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 154);
@@ -6336,7 +6419,12 @@ static bool perkDialogHandleMutatePerk()
     if (result) {
         fontSetCurrent(103);
 
-        blitBufferToBuffer(gPerkDialogBackgroundBuffer + PERK_WINDOW_WIDTH * 14 + 49, 206, fontGetLineHeight() + 2, PERK_WINDOW_WIDTH, gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 15 + 49, PERK_WINDOW_WIDTH);
+        blitBufferToBuffer(_perkDialogBackgroundFrmImage.getData() + PERK_WINDOW_WIDTH * 14 + 49,
+            206,
+            fontGetLineHeight() + 2,
+            PERK_WINDOW_WIDTH,
+            gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 15 + 49,
+            PERK_WINDOW_WIDTH);
 
         // PICK A NEW TRAIT
         char* msg = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 153);
@@ -6378,7 +6466,12 @@ static bool perkDialogHandleMutatePerk()
 // 0x43D668
 static void perkDialogRefreshSkills()
 {
-    blitBufferToBuffer(gPerkDialogBackgroundBuffer + 280, 293, PERK_WINDOW_HEIGHT, PERK_WINDOW_WIDTH, gPerkDialogWindowBuffer + 280, PERK_WINDOW_WIDTH);
+    blitBufferToBuffer(_perkDialogBackgroundFrmImage.getData() + 280,
+        293,
+        PERK_WINDOW_HEIGHT,
+        PERK_WINDOW_WIDTH,
+        gPerkDialogWindowBuffer + 280,
+        PERK_WINDOW_WIDTH);
 
     perkDialogDrawSkills();
 
@@ -6395,7 +6488,12 @@ static bool perkDialogHandleTagPerk()
 {
     fontSetCurrent(103);
 
-    blitBufferToBuffer(gPerkDialogBackgroundBuffer + 573 * 14 + 49, 206, fontGetLineHeight() + 2, 573, gPerkDialogWindowBuffer + 573 * 15 + 49, 573);
+    blitBufferToBuffer(_perkDialogBackgroundFrmImage.getData() + 573 * 14 + 49,
+        206,
+        fontGetLineHeight() + 2,
+        573,
+        gPerkDialogWindowBuffer + 573 * 15 + 49,
+        573);
 
     // PICK A NEW TAG SKILL
     char* messageListItemText = getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 155);
@@ -6424,7 +6522,12 @@ static bool perkDialogHandleTagPerk()
 // 0x43D81C
 static void perkDialogDrawSkills()
 {
-    blitBufferToBuffer(gPerkDialogBackgroundBuffer + PERK_WINDOW_WIDTH * 43 + 45, 192, 129, PERK_WINDOW_WIDTH, gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 43 + 45, PERK_WINDOW_WIDTH);
+    blitBufferToBuffer(_perkDialogBackgroundFrmImage.getData() + PERK_WINDOW_WIDTH * 43 + 45,
+        192,
+        129,
+        PERK_WINDOW_WIDTH,
+        gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 43 + 45,
+        PERK_WINDOW_WIDTH);
 
     fontSetCurrent(101);
 
@@ -6459,7 +6562,12 @@ static void perkDialogDrawSkills()
 // 0x43D960
 static int perkDialogDrawTraits(int a1)
 {
-    blitBufferToBuffer(gPerkDialogBackgroundBuffer + PERK_WINDOW_WIDTH * 43 + 45, 192, 129, PERK_WINDOW_WIDTH, gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 43 + 45, PERK_WINDOW_WIDTH);
+    blitBufferToBuffer(_perkDialogBackgroundFrmImage.getData() + PERK_WINDOW_WIDTH * 43 + 45,
+        192,
+        129,
+        PERK_WINDOW_WIDTH,
+        gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 43 + 45,
+        PERK_WINDOW_WIDTH);
 
     fontSetCurrent(101);
 
@@ -6526,32 +6634,32 @@ static int perkDialogOptionCompare(const void* a1, const void* a2)
 // 0x43DB54
 static int perkDialogDrawCard(int frmId, const char* name, const char* rank, char* description)
 {
-    int fid = buildFid(10, frmId, 0, 0, 0);
-
-    CacheEntry* handle;
-    int width;
-    int height;
-    unsigned char* data = artLockFrameDataReturningSize(fid, &handle, &width, &height);
-    if (data == NULL) {
+    FrmImage frmImage;
+    int fid = buildFid(OBJ_TYPE_SKILLDEX, frmId, 0, 0, 0);
+    if (!frmImage.lock(fid)) {
         return -1;
     }
 
-    blitBufferToBuffer(data, width, height, width, gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 64 + 413, PERK_WINDOW_WIDTH);
+    blitBufferToBuffer(frmImage.getData(),
+        frmImage.getWidth(),
+        frmImage.getHeight(),
+        frmImage.getWidth(),
+        gPerkDialogWindowBuffer + PERK_WINDOW_WIDTH * 64 + 413,
+        PERK_WINDOW_WIDTH);
 
     // Calculate width of transparent pixels on the left side of the image. This
     // space will be occupied by description (in addition to fixed width).
     int extraDescriptionWidth = 150;
-    for (int y = 0; y < height; y++) {
+    unsigned char* data = frmImage.getData();
+    for (int y = 0; y < frmImage.getHeight(); y++) {
         unsigned char* stride = data;
-        for (int x = 0; x < width; x++) {
-            if (_HighRGB_(*stride) < 2) {
-                if (extraDescriptionWidth > x) {
-                    extraDescriptionWidth = x;
-                }
+        for (int x = 0; x < frmImage.getWidth(); x++) {
+            if (HighRGB(*stride) < 2) {
+                extraDescriptionWidth = std::min(extraDescriptionWidth, x);
             }
             stride++;
         }
-        data += width;
+        data += frmImage.getWidth();
     }
 
     // Add gap between description and image.
@@ -6611,8 +6719,6 @@ static int perkDialogDrawCard(int frmId, const char* name, const char* rank, cha
     strcpy(gPerkDialogCardTitle, name);
     gPerkDialogCardFrmId = frmId;
     gPerkDialogCardDrawn = true;
-    
-    artUnlock(handle);
 
     return 0;
 }
@@ -6669,7 +6775,7 @@ static int characterEditorFolderViewInit()
     gCharacterEditorKillsFolderTopLine = 0;
 
     if (gCharacterEditorFolderViewScrollUpBtn == -1) {
-        gCharacterEditorFolderViewScrollUpBtn = buttonCreate(gCharacterEditorWindow, 317, 364, gCharacterEditorFrmSize[22].width, gCharacterEditorFrmSize[22].height, -1, -1, -1, 17000, gCharacterEditorFrmData[21], gCharacterEditorFrmData[22], NULL, 32);
+        gCharacterEditorFolderViewScrollUpBtn = buttonCreate(gCharacterEditorWindow, 317, 364, _editorFrmImages[22].getWidth(), _editorFrmImages[22].getHeight(), -1, -1, -1, 17000, _editorFrmImages[21].getData(), _editorFrmImages[22].getData(), NULL, 32);
         if (gCharacterEditorFolderViewScrollUpBtn == -1) {
             return -1;
         }
@@ -6680,15 +6786,15 @@ static int characterEditorFolderViewInit()
     if (gCharacterEditorFolderViewScrollDownBtn == -1) {
         gCharacterEditorFolderViewScrollDownBtn = buttonCreate(gCharacterEditorWindow,
             317,
-            365 + gCharacterEditorFrmSize[22].height,
-            gCharacterEditorFrmSize[4].width,
-            gCharacterEditorFrmSize[4].height,
+            365 + _editorFrmImages[22].getHeight(),
+            _editorFrmImages[4].getWidth(),
+            _editorFrmImages[4].getHeight(),
             gCharacterEditorFolderViewScrollDownBtn,
             gCharacterEditorFolderViewScrollDownBtn,
             gCharacterEditorFolderViewScrollDownBtn,
             17001,
-            gCharacterEditorFrmData[3],
-            gCharacterEditorFrmData[4],
+            _editorFrmImages[3].getData(),
+            _editorFrmImages[4].getData(),
             0,
             32);
         if (gCharacterEditorFolderViewScrollDownBtn == -1) {
@@ -6742,7 +6848,7 @@ static void characterEditorFolderViewScroll(int direction)
 
     if (characterEditorSelectedItem >= 10 && characterEditorSelectedItem < 43) {
         blitBufferToBuffer(
-            gCharacterEditorWindowBackgroundBuffer + 640 * 267 + 345,
+            _editorBackgroundFrmImage.getData() + 640 * 267 + 345,
             277,
             170,
             640,
@@ -7162,3 +7268,55 @@ static int customKarmaFolderGetFrmId()
     }
     return gCustomKarmaFolderDescriptions.end()->frmId;
 }
+
+static void customTownReputationInit()
+{
+    char* reputationList = NULL;
+    configGetString(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_CITY_REPUTATION_LIST_KEY, &reputationList);
+    if (reputationList != NULL && *reputationList == '\0') {
+        reputationList = NULL;
+    }
+
+    char* curr = reputationList;
+    while (curr != NULL) {
+        char* next = strchr(curr, ',');
+        if (next != NULL) {
+            *next = '\0';
+        }
+
+        char* sep = strchr(curr, ':');
+        if (sep != NULL) {
+            *sep = '\0';
+
+            TownReputationEntry entry;
+            entry.city = atoi(curr);
+            entry.gvar = atoi(sep + 1);
+            gCustomTownReputationEntries.push_back(std::move(entry));
+
+            *sep = ':';
+        }
+
+        if (next != NULL) {
+            *next = ',';
+            curr = next + 1;
+        } else {
+            curr = NULL;
+        }
+    }
+
+    if (gCustomTownReputationEntries.empty()) {
+        gCustomTownReputationEntries.resize(TOWN_REPUTATION_COUNT);
+
+        for (int index = 0; index < TOWN_REPUTATION_COUNT; index++) {
+            gCustomTownReputationEntries[index].gvar = gTownReputationEntries[index].gvar;
+            gCustomTownReputationEntries[index].city = gTownReputationEntries[index].city;
+        }
+    }
+}
+
+static void customTownReputationFree()
+{
+    gCustomTownReputationEntries.clear();
+}
+
+} // namespace fallout

@@ -1,30 +1,40 @@
 #include "character_selector.h"
 
+#include <stdio.h>
+#include <string.h>
+
+#include <algorithm>
+#include <vector>
+
 #include "art.h"
 #include "character_editor.h"
 #include "color.h"
-#include "core.h"
 #include "critter.h"
 #include "db.h"
 #include "debug.h"
 #include "draw.h"
 #include "game.h"
 #include "game_sound.h"
+#include "input.h"
+#include "kb.h"
 #include "memory.h"
 #include "message.h"
+#include "mouse.h"
 #include "object.h"
-#include "options.h"
 #include "palette.h"
 #include "platform_compat.h"
+#include "preferences.h"
 #include "proto.h"
+#include "settings.h"
+#include "sfall_config.h"
 #include "skill.h"
 #include "stat.h"
+#include "svga.h"
 #include "text_font.h"
 #include "trait.h"
 #include "window_manager.h"
 
-#include <stdio.h>
-#include <string.h>
+namespace fallout {
 
 #define CS_WINDOW_WIDTH (640)
 #define CS_WINDOW_HEIGHT (480)
@@ -57,12 +67,28 @@
 #define CS_WINDOW_SECONDARY_STAT_MID_X (379)
 #define CS_WINDOW_BIO_X (438)
 
+typedef enum PremadeCharacter {
+    PREMADE_CHARACTER_NARG,
+    PREMADE_CHARACTER_CHITSA,
+    PREMADE_CHARACTER_MINGUN,
+    PREMADE_CHARACTER_COUNT,
+} PremadeCharacter;
+
+typedef struct PremadeCharacterDescription {
+    char fileName[20];
+    int face;
+    char field_18[20];
+} PremadeCharacterDescription;
+
 static bool characterSelectorWindowInit();
 static void characterSelectorWindowFree();
 static bool characterSelectorWindowRefresh();
 static bool characterSelectorWindowRenderFace();
 static bool characterSelectorWindowRenderStats();
 static bool characterSelectorWindowRenderBio();
+static bool characterSelectorWindowFatalError(bool result);
+
+static void premadeCharactersLocalizePath(char* path);
 
 // 0x51C84C
 static int gCurrentPremadeCharacter = PREMADE_CHARACTER_NARG;
@@ -75,7 +101,7 @@ static PremadeCharacterDescription gPremadeCharacterDescriptions[PREMADE_CHARACT
 };
 
 // 0x51C8D4
-static const int gPremadeCharacterCount = PREMADE_CHARACTER_COUNT;
+static int gPremadeCharacterCount = PREMADE_CHARACTER_COUNT;
 
 // 0x51C7F8
 static int gCharacterSelectorWindow = -1;
@@ -89,92 +115,35 @@ static unsigned char* gCharacterSelectorBackground = NULL;
 // 0x51C804
 static int gCharacterSelectorWindowPreviousButton = -1;
 
-// 0x51C808
-static CacheEntry* gCharacterSelectorWindowPreviousButtonUpFrmHandle = NULL;
-
-// 0x51C80C
-static CacheEntry* gCharacterSelectorWindowPreviousButtonDownFrmHandle = NULL;
-
 // 0x51C810
 static int gCharacterSelectorWindowNextButton = -1;
-
-// 0x51C814
-static CacheEntry* gCharacterSelectorWindowNextButtonUpFrmHandle = NULL;
-
-// 0x51C818
-static CacheEntry* gCharacterSelectorWindowNextButtonDownFrmHandle = NULL;
 
 // 0x51C81C
 static int gCharacterSelectorWindowTakeButton = -1;
 
-// 0x51C820
-static CacheEntry* gCharacterSelectorWindowTakeButtonUpFrmHandle = NULL;
-
-// 0x51C824
-static CacheEntry* gCharacterSelectorWindowTakeButtonDownFrmHandle = NULL;
-
 // 0x51C828
 static int gCharacterSelectorWindowModifyButton = -1;
-
-// 0x51C82C
-static CacheEntry* gCharacterSelectorWindowModifyButtonUpFrmHandle = NULL;
-
-// 0x51C830
-static CacheEntry* gCharacterSelectorWindowModifyButtonDownFrmHandle = NULL;
 
 // 0x51C834
 static int gCharacterSelectorWindowCreateButton = -1;
 
-// 0x51C838
-static CacheEntry* gCharacterSelectorWindowCreateButtonUpFrmHandle = NULL;
-
-// 0x51C83C
-static CacheEntry* gCharacterSelectorWindowCreateButtonDownFrmHandle = NULL;
-
 // 0x51C840
 static int gCharacterSelectorWindowBackButton = -1;
 
-// 0x51C844
-static CacheEntry* gCharacterSelectorWindowBackButtonUpFrmHandle = NULL;
+static FrmImage _takeButtonNormalFrmImage;
+static FrmImage _takeButtonPressedFrmImage;
+static FrmImage _modifyButtonNormalFrmImage;
+static FrmImage _modifyButtonPressedFrmImage;
+static FrmImage _createButtonNormalFrmImage;
+static FrmImage _createButtonPressedFrmImage;
+static FrmImage _backButtonNormalFrmImage;
+static FrmImage _backButtonPressedFrmImage;
+static FrmImage _nextButtonNormalFrmImage;
+static FrmImage _nextButtonPressedFrmImage;
+static FrmImage _previousButtonNormalFrmImage;
+static FrmImage _previousButtonPressedFrmImage;
 
-// 0x51C848
-static CacheEntry* gCharacterSelectorWindowBackButtonDownFrmHandle = NULL;
-
-// 0x667764
-static unsigned char* gCharacterSelectorWindowTakeButtonUpFrmData;
-
-// 0x667768
-static unsigned char* gCharacterSelectorWindowModifyButtonDownFrmData;
-
-// 0x66776C
-static unsigned char* gCharacterSelectorWindowBackButtonUpFrmData;
-
-// 0x667770
-static unsigned char* gCharacterSelectorWindowCreateButtonUpFrmData;
-
-// 0x667774
-static unsigned char* gCharacterSelectorWindowModifyButtonUpFrmData;
-
-// 0x667778
-static unsigned char* gCharacterSelectorWindowBackButtonDownFrmData;
-
-// 0x66777C
-static unsigned char* gCharacterSelectorWindowCreateButtonDownFrmData;
-
-// 0x667780
-static unsigned char* gCharacterSelectorWindowTakeButtonDownFrmData;
-
-// 0x667784
-static unsigned char* gCharacterSelectorWindowNextButtonDownFrmData;
-
-// 0x667788
-static unsigned char* gCharacterSelectorWindowNextButtonUpFrmData;
-
-// 0x66778C
-static unsigned char* gCharacterSelectorWindowPreviousButtonUpFrmData;
-
-// 0x667790
-static unsigned char* gCharacterSelectorWindowPreviousButtonDownFrmData;
+static std::vector<PremadeCharacterDescription> gCustomPremadeCharacterDescriptions;
 
 // 0x4A71D0
 int characterSelectorOpen()
@@ -194,11 +163,13 @@ int characterSelectorOpen()
     int rc = 0;
     bool done = false;
     while (!done) {
+        sharedFpsLimiter.mark();
+
         if (_game_user_wants_to_quit != 0) {
             break;
         }
 
-        int keyCode = _get_input();
+        int keyCode = inputGetInput();
 
         switch (keyCode) {
         case KEY_MINUS:
@@ -221,6 +192,8 @@ int characterSelectorOpen()
             if (characterEditorShow(1) == 0) {
                 rc = 2;
                 done = true;
+            } else {
+                characterSelectorWindowRefresh();
             }
 
             break;
@@ -229,6 +202,8 @@ int characterSelectorOpen()
             if (!characterEditorShow(1)) {
                 rc = 2;
                 done = true;
+            } else {
+                characterSelectorWindowRefresh();
             }
 
             break;
@@ -264,6 +239,9 @@ int characterSelectorOpen()
             characterSelectorWindowRefresh();
             break;
         }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
     }
 
     paletteFadeTo(gPaletteBlack);
@@ -279,9 +257,6 @@ int characterSelectorOpen()
 // 0x4A7468
 static bool characterSelectorWindowInit()
 {
-    int backgroundFid;
-    unsigned char* backgroundFrmData;
-
     if (gCharacterSelectorWindow != -1) {
         return false;
     }
@@ -290,22 +265,21 @@ static bool characterSelectorWindowInit()
     int characterSelectorWindowY = (screenGetHeight() - CS_WINDOW_HEIGHT) / 2;
     gCharacterSelectorWindow = windowCreate(characterSelectorWindowX, characterSelectorWindowY, CS_WINDOW_WIDTH, CS_WINDOW_HEIGHT, _colorTable[0], 0);
     if (gCharacterSelectorWindow == -1) {
-        goto err;
+        return characterSelectorWindowFatalError(false);
     }
 
     gCharacterSelectorWindowBuffer = windowGetBuffer(gCharacterSelectorWindow);
     if (gCharacterSelectorWindowBuffer == NULL) {
-        goto err;
+        return characterSelectorWindowFatalError(false);
     }
 
-    CacheEntry* backgroundFrmHandle;
-    backgroundFid = buildFid(6, 174, 0, 0, 0);
-    backgroundFrmData = artLockFrameData(backgroundFid, 0, 0, &backgroundFrmHandle);
-    if (backgroundFrmData == NULL) {
-        goto err;
+    FrmImage backgroundFrmImage;
+    int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, 174, 0, 0, 0);
+    if (!backgroundFrmImage.lock(backgroundFid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
-    blitBufferToBuffer(backgroundFrmData,
+    blitBufferToBuffer(backgroundFrmImage.getData(),
         CS_WINDOW_WIDTH,
         CS_WINDOW_HEIGHT,
         CS_WINDOW_WIDTH,
@@ -314,30 +288,28 @@ static bool characterSelectorWindowInit()
 
     gCharacterSelectorBackground = (unsigned char*)internal_malloc(CS_WINDOW_BACKGROUND_WIDTH * CS_WINDOW_BACKGROUND_HEIGHT);
     if (gCharacterSelectorBackground == NULL)
-        goto err;
+        return characterSelectorWindowFatalError(false);
 
-    blitBufferToBuffer(backgroundFrmData + CS_WINDOW_WIDTH * CS_WINDOW_BACKGROUND_Y + CS_WINDOW_BACKGROUND_X,
+    blitBufferToBuffer(backgroundFrmImage.getData() + CS_WINDOW_WIDTH * CS_WINDOW_BACKGROUND_Y + CS_WINDOW_BACKGROUND_X,
         CS_WINDOW_BACKGROUND_WIDTH,
         CS_WINDOW_BACKGROUND_HEIGHT,
         CS_WINDOW_WIDTH,
         gCharacterSelectorBackground,
         CS_WINDOW_BACKGROUND_WIDTH);
 
-    artUnlock(backgroundFrmHandle);
+    backgroundFrmImage.unlock();
 
     int fid;
 
     // Setup "Previous" button.
-    fid = buildFid(6, 122, 0, 0, 0);
-    gCharacterSelectorWindowPreviousButtonUpFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowPreviousButtonUpFrmHandle);
-    if (gCharacterSelectorWindowPreviousButtonUpFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 122, 0, 0, 0);
+    if (!_previousButtonNormalFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
-    fid = buildFid(6, 123, 0, 0, 0);
-    gCharacterSelectorWindowPreviousButtonDownFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowPreviousButtonDownFrmHandle);
-    if (gCharacterSelectorWindowPreviousButtonDownFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 123, 0, 0, 0);
+    if (!_previousButtonPressedFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
     gCharacterSelectorWindowPreviousButton = buttonCreate(gCharacterSelectorWindow,
@@ -349,27 +321,25 @@ static bool characterSelectorWindowInit()
         -1,
         -1,
         500,
-        gCharacterSelectorWindowPreviousButtonUpFrmData,
-        gCharacterSelectorWindowPreviousButtonDownFrmData,
+        _previousButtonNormalFrmImage.getData(),
+        _previousButtonPressedFrmImage.getData(),
         NULL,
         0);
     if (gCharacterSelectorWindowPreviousButton == -1) {
-        goto err;
+        return characterSelectorWindowFatalError(false);
     }
 
     buttonSetCallbacks(gCharacterSelectorWindowPreviousButton, _gsound_med_butt_press, _gsound_med_butt_release);
 
     // Setup "Next" button.
-    fid = buildFid(6, 124, 0, 0, 0);
-    gCharacterSelectorWindowNextButtonUpFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowNextButtonUpFrmHandle);
-    if (gCharacterSelectorWindowNextButtonUpFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 124, 0, 0, 0);
+    if (!_nextButtonNormalFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
-    fid = buildFid(6, 125, 0, 0, 0);
-    gCharacterSelectorWindowNextButtonDownFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowNextButtonDownFrmHandle);
-    if (gCharacterSelectorWindowNextButtonDownFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 125, 0, 0, 0);
+    if (!_nextButtonPressedFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
     gCharacterSelectorWindowNextButton = buttonCreate(gCharacterSelectorWindow,
@@ -381,27 +351,25 @@ static bool characterSelectorWindowInit()
         -1,
         -1,
         501,
-        gCharacterSelectorWindowNextButtonUpFrmData,
-        gCharacterSelectorWindowNextButtonDownFrmData,
+        _nextButtonNormalFrmImage.getData(),
+        _nextButtonPressedFrmImage.getData(),
         NULL,
         0);
     if (gCharacterSelectorWindowNextButton == -1) {
-        goto err;
+        return characterSelectorWindowFatalError(false);
     }
 
     buttonSetCallbacks(gCharacterSelectorWindowNextButton, _gsound_med_butt_press, _gsound_med_butt_release);
 
     // Setup "Take" button.
-    fid = buildFid(6, 8, 0, 0, 0);
-    gCharacterSelectorWindowTakeButtonUpFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowTakeButtonUpFrmHandle);
-    if (gCharacterSelectorWindowTakeButtonUpFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 8, 0, 0, 0);
+    if (!_takeButtonNormalFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
-    fid = buildFid(6, 9, 0, 0, 0);
-    gCharacterSelectorWindowTakeButtonDownFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowTakeButtonDownFrmHandle);
-    if (gCharacterSelectorWindowTakeButtonDownFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 9, 0, 0, 0);
+    if (!_takeButtonPressedFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
     gCharacterSelectorWindowTakeButton = buttonCreate(gCharacterSelectorWindow,
@@ -413,26 +381,24 @@ static bool characterSelectorWindowInit()
         -1,
         -1,
         KEY_LOWERCASE_T,
-        gCharacterSelectorWindowTakeButtonUpFrmData,
-        gCharacterSelectorWindowTakeButtonDownFrmData,
+        _takeButtonNormalFrmImage.getData(),
+        _takeButtonPressedFrmImage.getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (gCharacterSelectorWindowTakeButton == -1) {
-        goto err;
+        return characterSelectorWindowFatalError(false);
     }
 
     buttonSetCallbacks(gCharacterSelectorWindowTakeButton, _gsound_red_butt_press, _gsound_red_butt_release);
 
     // Setup "Modify" button.
-    fid = buildFid(6, 8, 0, 0, 0);
-    gCharacterSelectorWindowModifyButtonUpFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowModifyButtonUpFrmHandle);
-    if (gCharacterSelectorWindowModifyButtonUpFrmData == NULL)
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 8, 0, 0, 0);
+    if (!_modifyButtonNormalFrmImage.lock(fid))
+        return characterSelectorWindowFatalError(false);
 
-    fid = buildFid(6, 9, 0, 0, 0);
-    gCharacterSelectorWindowModifyButtonDownFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowModifyButtonDownFrmHandle);
-    if (gCharacterSelectorWindowModifyButtonDownFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 9, 0, 0, 0);
+    if (!_modifyButtonPressedFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
     gCharacterSelectorWindowModifyButton = buttonCreate(gCharacterSelectorWindow,
@@ -444,27 +410,25 @@ static bool characterSelectorWindowInit()
         -1,
         -1,
         KEY_LOWERCASE_M,
-        gCharacterSelectorWindowModifyButtonUpFrmData,
-        gCharacterSelectorWindowModifyButtonDownFrmData,
+        _modifyButtonNormalFrmImage.getData(),
+        _modifyButtonPressedFrmImage.getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (gCharacterSelectorWindowModifyButton == -1) {
-        goto err;
+        return characterSelectorWindowFatalError(false);
     }
 
     buttonSetCallbacks(gCharacterSelectorWindowModifyButton, _gsound_red_butt_press, _gsound_red_butt_release);
 
     // Setup "Create" button.
-    fid = buildFid(6, 8, 0, 0, 0);
-    gCharacterSelectorWindowCreateButtonUpFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowCreateButtonUpFrmHandle);
-    if (gCharacterSelectorWindowCreateButtonUpFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 8, 0, 0, 0);
+    if (!_createButtonNormalFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
-    fid = buildFid(6, 9, 0, 0, 0);
-    gCharacterSelectorWindowCreateButtonDownFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowCreateButtonDownFrmHandle);
-    if (gCharacterSelectorWindowCreateButtonDownFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 9, 0, 0, 0);
+    if (!_createButtonPressedFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
     gCharacterSelectorWindowCreateButton = buttonCreate(gCharacterSelectorWindow,
@@ -476,27 +440,25 @@ static bool characterSelectorWindowInit()
         -1,
         -1,
         KEY_LOWERCASE_C,
-        gCharacterSelectorWindowCreateButtonUpFrmData,
-        gCharacterSelectorWindowCreateButtonDownFrmData,
+        _createButtonNormalFrmImage.getData(),
+        _createButtonPressedFrmImage.getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (gCharacterSelectorWindowCreateButton == -1) {
-        goto err;
+        return characterSelectorWindowFatalError(false);
     }
 
     buttonSetCallbacks(gCharacterSelectorWindowCreateButton, _gsound_red_butt_press, _gsound_red_butt_release);
 
     // Setup "Back" button.
-    fid = buildFid(6, 8, 0, 0, 0);
-    gCharacterSelectorWindowBackButtonUpFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowBackButtonUpFrmHandle);
-    if (gCharacterSelectorWindowBackButtonUpFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 8, 0, 0, 0);
+    if (!_backButtonNormalFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
-    fid = buildFid(6, 9, 0, 0, 0);
-    gCharacterSelectorWindowBackButtonDownFrmData = artLockFrameData(fid, 0, 0, &gCharacterSelectorWindowBackButtonDownFrmHandle);
-    if (gCharacterSelectorWindowBackButtonDownFrmData == NULL) {
-        goto err;
+    fid = buildFid(OBJ_TYPE_INTERFACE, 9, 0, 0, 0);
+    if (!_backButtonPressedFrmImage.lock(fid)) {
+        return characterSelectorWindowFatalError(false);
     }
 
     gCharacterSelectorWindowBackButton = buttonCreate(gCharacterSelectorWindow,
@@ -508,12 +470,12 @@ static bool characterSelectorWindowInit()
         -1,
         -1,
         KEY_ESCAPE,
-        gCharacterSelectorWindowBackButtonUpFrmData,
-        gCharacterSelectorWindowBackButtonDownFrmData,
+        _backButtonNormalFrmImage.getData(),
+        _backButtonPressedFrmImage.getData(),
         NULL,
         BUTTON_FLAG_TRANSPARENT);
     if (gCharacterSelectorWindowBackButton == -1) {
-        goto err;
+        return characterSelectorWindowFatalError(false);
     }
 
     buttonSetCallbacks(gCharacterSelectorWindowBackButton, _gsound_red_butt_press, _gsound_red_butt_release);
@@ -523,16 +485,10 @@ static bool characterSelectorWindowInit()
     windowRefresh(gCharacterSelectorWindow);
 
     if (!characterSelectorWindowRefresh()) {
-        goto err;
+        return characterSelectorWindowFatalError(false);
     }
 
     return true;
-
-err:
-
-    characterSelectorWindowFree();
-
-    return false;
 }
 
 // 0x4A7AD4
@@ -547,102 +503,48 @@ static void characterSelectorWindowFree()
         gCharacterSelectorWindowPreviousButton = -1;
     }
 
-    if (gCharacterSelectorWindowPreviousButtonDownFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowPreviousButtonDownFrmHandle);
-        gCharacterSelectorWindowPreviousButtonDownFrmHandle = NULL;
-        gCharacterSelectorWindowPreviousButtonDownFrmData = NULL;
-    }
-
-    if (gCharacterSelectorWindowPreviousButtonUpFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowPreviousButtonUpFrmHandle);
-        gCharacterSelectorWindowPreviousButtonUpFrmHandle = NULL;
-        gCharacterSelectorWindowPreviousButtonUpFrmData = NULL;
-    }
+    _previousButtonNormalFrmImage.unlock();
+    _previousButtonPressedFrmImage.unlock();
 
     if (gCharacterSelectorWindowNextButton != -1) {
         buttonDestroy(gCharacterSelectorWindowNextButton);
         gCharacterSelectorWindowNextButton = -1;
     }
 
-    if (gCharacterSelectorWindowNextButtonDownFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowNextButtonDownFrmHandle);
-        gCharacterSelectorWindowNextButtonDownFrmHandle = NULL;
-        gCharacterSelectorWindowNextButtonDownFrmData = NULL;
-    }
-
-    if (gCharacterSelectorWindowNextButtonUpFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowNextButtonUpFrmHandle);
-        gCharacterSelectorWindowNextButtonUpFrmHandle = NULL;
-        gCharacterSelectorWindowNextButtonUpFrmData = NULL;
-    }
+    _nextButtonNormalFrmImage.unlock();
+    _nextButtonPressedFrmImage.unlock();
 
     if (gCharacterSelectorWindowTakeButton != -1) {
         buttonDestroy(gCharacterSelectorWindowTakeButton);
         gCharacterSelectorWindowTakeButton = -1;
     }
 
-    if (gCharacterSelectorWindowTakeButtonDownFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowTakeButtonDownFrmHandle);
-        gCharacterSelectorWindowTakeButtonDownFrmHandle = NULL;
-        gCharacterSelectorWindowTakeButtonDownFrmData = NULL;
-    }
-
-    if (gCharacterSelectorWindowTakeButtonUpFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowTakeButtonUpFrmHandle);
-        gCharacterSelectorWindowTakeButtonUpFrmHandle = NULL;
-        gCharacterSelectorWindowTakeButtonUpFrmData = NULL;
-    }
+    _takeButtonNormalFrmImage.unlock();
+    _takeButtonPressedFrmImage.unlock();
 
     if (gCharacterSelectorWindowModifyButton != -1) {
         buttonDestroy(gCharacterSelectorWindowModifyButton);
         gCharacterSelectorWindowModifyButton = -1;
     }
 
-    if (gCharacterSelectorWindowModifyButtonDownFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowModifyButtonDownFrmHandle);
-        gCharacterSelectorWindowModifyButtonDownFrmHandle = NULL;
-        gCharacterSelectorWindowModifyButtonDownFrmData = NULL;
-    }
-
-    if (gCharacterSelectorWindowModifyButtonUpFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowModifyButtonUpFrmHandle);
-        gCharacterSelectorWindowModifyButtonUpFrmHandle = NULL;
-        gCharacterSelectorWindowModifyButtonUpFrmData = NULL;
-    }
+    _modifyButtonNormalFrmImage.unlock();
+    _modifyButtonPressedFrmImage.unlock();
 
     if (gCharacterSelectorWindowCreateButton != -1) {
         buttonDestroy(gCharacterSelectorWindowCreateButton);
         gCharacterSelectorWindowCreateButton = -1;
     }
 
-    if (gCharacterSelectorWindowCreateButtonDownFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowCreateButtonDownFrmHandle);
-        gCharacterSelectorWindowCreateButtonDownFrmHandle = NULL;
-        gCharacterSelectorWindowCreateButtonDownFrmData = NULL;
-    }
-
-    if (gCharacterSelectorWindowCreateButtonUpFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowCreateButtonUpFrmHandle);
-        gCharacterSelectorWindowCreateButtonUpFrmHandle = NULL;
-        gCharacterSelectorWindowCreateButtonUpFrmData = NULL;
-    }
+    _createButtonNormalFrmImage.unlock();
+    _createButtonPressedFrmImage.unlock();
 
     if (gCharacterSelectorWindowBackButton != -1) {
         buttonDestroy(gCharacterSelectorWindowBackButton);
         gCharacterSelectorWindowBackButton = -1;
     }
 
-    if (gCharacterSelectorWindowBackButtonDownFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowBackButtonDownFrmHandle);
-        gCharacterSelectorWindowBackButtonDownFrmHandle = NULL;
-        gCharacterSelectorWindowBackButtonDownFrmData = NULL;
-    }
-
-    if (gCharacterSelectorWindowBackButtonUpFrmData != NULL) {
-        artUnlock(gCharacterSelectorWindowBackButtonUpFrmHandle);
-        gCharacterSelectorWindowBackButtonUpFrmHandle = NULL;
-        gCharacterSelectorWindowBackButtonUpFrmData = NULL;
-    }
+    _backButtonNormalFrmImage.unlock();
+    _backButtonPressedFrmImage.unlock();
 
     if (gCharacterSelectorBackground != NULL) {
         internal_free(gCharacterSelectorBackground);
@@ -657,7 +559,9 @@ static void characterSelectorWindowFree()
 static bool characterSelectorWindowRefresh()
 {
     char path[COMPAT_MAX_PATH];
-    sprintf(path, "%s.gcd", gPremadeCharacterDescriptions[gCurrentPremadeCharacter].fileName);
+    snprintf(path, sizeof(path), "%s.gcd", gCustomPremadeCharacterDescriptions[gCurrentPremadeCharacter].fileName);
+    premadeCharactersLocalizePath(path);
+
     if (_proto_dude_init(path) == -1) {
         debugPrint("\n ** Error in dude init! **\n");
         return false;
@@ -687,18 +591,17 @@ static bool characterSelectorWindowRenderFace()
 {
     bool success = false;
 
-    CacheEntry* faceFrmHandle;
-    int faceFid = buildFid(6, gPremadeCharacterDescriptions[gCurrentPremadeCharacter].face, 0, 0, 0);
-    Art* frm = artLock(faceFid, &faceFrmHandle);
-    if (frm != NULL) {
-        unsigned char* data = artGetFrameData(frm, 0, 0);
+    FrmImage faceFrmImage;
+    int faceFid = buildFid(OBJ_TYPE_INTERFACE, gCustomPremadeCharacterDescriptions[gCurrentPremadeCharacter].face, 0, 0, 0);
+    if (faceFrmImage.lock(faceFid)) {
+        unsigned char* data = faceFrmImage.getData();
         if (data != NULL) {
-            int width = artGetWidth(frm, 0, 0);
-            int height = artGetHeight(frm, 0, 0);
+            int width = faceFrmImage.getWidth();
+            int height = faceFrmImage.getHeight();
             blitBufferToBufferTrans(data, width, height, width, (gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * 23 + 27), CS_WINDOW_WIDTH);
             success = true;
         }
-        artUnlock(faceFrmHandle);
+        faceFrmImage.unlock();
     }
 
     return success;
@@ -734,13 +637,13 @@ static bool characterSelectorWindowRenderStats()
     value = critterGetStat(gDude, STAT_STRENGTH);
     str = statGetName(STAT_STRENGTH);
 
-    sprintf(text, "%s %02d", str, value);
+    snprintf(text, sizeof(text), "%s %02d", str, value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     str = statGetValueDescription(value);
-    sprintf(text, "  %s", str);
+    snprintf(text, sizeof(text), "  %s", str);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -751,13 +654,13 @@ static bool characterSelectorWindowRenderStats()
     value = critterGetStat(gDude, STAT_PERCEPTION);
     str = statGetName(STAT_PERCEPTION);
 
-    sprintf(text, "%s %02d", str, value);
+    snprintf(text, sizeof(text), "%s %02d", str, value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     str = statGetValueDescription(value);
-    sprintf(text, "  %s", str);
+    snprintf(text, sizeof(text), "  %s", str);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -766,15 +669,15 @@ static bool characterSelectorWindowRenderStats()
     y += vh;
 
     value = critterGetStat(gDude, STAT_ENDURANCE);
-    str = statGetName(STAT_PERCEPTION);
+    str = statGetName(STAT_ENDURANCE);
 
-    sprintf(text, "%s %02d", str, value);
+    snprintf(text, sizeof(text), "%s %02d", str, value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     str = statGetValueDescription(value);
-    sprintf(text, "  %s", str);
+    snprintf(text, sizeof(text), "  %s", str);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -785,13 +688,13 @@ static bool characterSelectorWindowRenderStats()
     value = critterGetStat(gDude, STAT_CHARISMA);
     str = statGetName(STAT_CHARISMA);
 
-    sprintf(text, "%s %02d", str, value);
+    snprintf(text, sizeof(text), "%s %02d", str, value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     str = statGetValueDescription(value);
-    sprintf(text, "  %s", str);
+    snprintf(text, sizeof(text), "  %s", str);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -802,13 +705,13 @@ static bool characterSelectorWindowRenderStats()
     value = critterGetStat(gDude, STAT_INTELLIGENCE);
     str = statGetName(STAT_INTELLIGENCE);
 
-    sprintf(text, "%s %02d", str, value);
+    snprintf(text, sizeof(text), "%s %02d", str, value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     str = statGetValueDescription(value);
-    sprintf(text, "  %s", str);
+    snprintf(text, sizeof(text), "  %s", str);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -819,13 +722,13 @@ static bool characterSelectorWindowRenderStats()
     value = critterGetStat(gDude, STAT_AGILITY);
     str = statGetName(STAT_AGILITY);
 
-    sprintf(text, "%s %02d", str, value);
+    snprintf(text, sizeof(text), "%s %02d", str, value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     str = statGetValueDescription(value);
-    sprintf(text, "  %s", str);
+    snprintf(text, sizeof(text), "  %s", str);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -836,13 +739,13 @@ static bool characterSelectorWindowRenderStats()
     value = critterGetStat(gDude, STAT_LUCK);
     str = statGetName(STAT_LUCK);
 
-    sprintf(text, "%s %02d", str, value);
+    snprintf(text, sizeof(text), "%s %02d", str, value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     str = statGetValueDescription(value);
-    sprintf(text, "  %s", str);
+    snprintf(text, sizeof(text), "  %s", str);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_PRIMARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -862,7 +765,7 @@ static bool characterSelectorWindowRenderStats()
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     value = critterGetStat(gDude, STAT_MAXIMUM_HIT_POINTS);
-    sprintf(text, " %d/%d", critterGetHitPoints(gDude), value);
+    snprintf(text, sizeof(text), " %d/%d", critterGetHitPoints(gDude), value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -877,7 +780,7 @@ static bool characterSelectorWindowRenderStats()
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     value = critterGetStat(gDude, STAT_ARMOR_CLASS);
-    sprintf(text, " %d", value);
+    snprintf(text, sizeof(text), " %d", value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -895,7 +798,7 @@ static bool characterSelectorWindowRenderStats()
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
     value = critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS);
-    sprintf(text, " %d", value);
+    snprintf(text, sizeof(text), " %d", value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -903,14 +806,14 @@ static bool characterSelectorWindowRenderStats()
     // MELEE DAMAGE
     y += vh;
 
-    str = statGetName(STAT_ARMOR_CLASS);
+    str = statGetName(STAT_MELEE_DAMAGE);
     strcpy(text, str);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
-    value = critterGetStat(gDude, STAT_ARMOR_CLASS);
-    sprintf(text, " %d", value);
+    value = critterGetStat(gDude, STAT_MELEE_DAMAGE);
+    snprintf(text, sizeof(text), " %d", value);
 
     length = fontGetStringWidth(text);
     fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -931,7 +834,7 @@ static bool characterSelectorWindowRenderStats()
         fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X - length, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
 
         value = skillGetValue(gDude, skills[index]);
-        sprintf(text, " %d%%", value);
+        snprintf(text, sizeof(text), " %d%%", value);
 
         length = fontGetStringWidth(text);
         fontDrawText(gCharacterSelectorWindowBuffer + CS_WINDOW_WIDTH * y + CS_WINDOW_SECONDARY_STAT_MID_X, text, length, CS_WINDOW_WIDTH, _colorTable[992]);
@@ -963,7 +866,8 @@ static bool characterSelectorWindowRenderBio()
     fontSetCurrent(101);
 
     char path[COMPAT_MAX_PATH];
-    sprintf(path, "%s.bio", gPremadeCharacterDescriptions[gCurrentPremadeCharacter].fileName);
+    snprintf(path, sizeof(path), "%s.bio", gCustomPremadeCharacterDescriptions[gCurrentPremadeCharacter].fileName);
+    premadeCharactersLocalizePath(path);
 
     File* stream = fileOpen(path, "rt");
     if (stream != NULL) {
@@ -983,3 +887,120 @@ static bool characterSelectorWindowRenderBio()
 
     return true;
 }
+
+// NOTE: Inlined.
+//
+// 0x4A8BD0
+static bool characterSelectorWindowFatalError(bool result)
+{
+    characterSelectorWindowFree();
+    return result;
+}
+
+void premadeCharactersInit()
+{
+    char* fileNamesString;
+    configGetString(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_PREMADE_CHARACTERS_FILE_NAMES_KEY, &fileNamesString);
+    if (fileNamesString != NULL && *fileNamesString == '\0') {
+        fileNamesString = NULL;
+    }
+
+    char* faceFidsString;
+    configGetString(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_PREMADE_CHARACTERS_FACE_FIDS_KEY, &faceFidsString);
+    if (faceFidsString != NULL && *faceFidsString == '\0') {
+        faceFidsString = NULL;
+    }
+
+    if (fileNamesString != NULL && faceFidsString != NULL) {
+        int fileNamesLength = 0;
+        for (char* pch = fileNamesString; pch != NULL; pch = strchr(pch + 1, ',')) {
+            fileNamesLength++;
+        }
+
+        int faceFidsLength = 0;
+        for (char* pch = faceFidsString; pch != NULL; pch = strchr(pch + 1, ',')) {
+            faceFidsLength++;
+        }
+
+        int premadeCharactersCount = std::min(fileNamesLength, faceFidsLength);
+        gCustomPremadeCharacterDescriptions.resize(premadeCharactersCount);
+
+        for (int index = 0; index < premadeCharactersCount; index++) {
+            char* pch;
+
+            pch = strchr(fileNamesString, ',');
+            if (pch != NULL) {
+                *pch = '\0';
+            }
+
+            if (strlen(fileNamesString) > 11) {
+                // Sfall fails here.
+                continue;
+            }
+
+            snprintf(gCustomPremadeCharacterDescriptions[index].fileName, sizeof(gCustomPremadeCharacterDescriptions[index].fileName), "premade\\%s", fileNamesString);
+
+            if (pch != NULL) {
+                *pch = ',';
+            }
+
+            fileNamesString = pch + 1;
+
+            pch = strchr(faceFidsString, ',');
+            if (pch != NULL) {
+                *pch = '\0';
+            }
+
+            gCustomPremadeCharacterDescriptions[index].face = atoi(faceFidsString);
+
+            if (pch != NULL) {
+                *pch = ',';
+            }
+
+            faceFidsString = pch + 1;
+
+            gCustomPremadeCharacterDescriptions[index].field_18[0] = '\0';
+        }
+    }
+
+    if (gCustomPremadeCharacterDescriptions.empty()) {
+        gCustomPremadeCharacterDescriptions.resize(PREMADE_CHARACTER_COUNT);
+
+        for (int index = 0; index < PREMADE_CHARACTER_COUNT; index++) {
+            strcpy(gCustomPremadeCharacterDescriptions[index].fileName, gPremadeCharacterDescriptions[index].fileName);
+            gCustomPremadeCharacterDescriptions[index].face = gPremadeCharacterDescriptions[index].face;
+            strcpy(gCustomPremadeCharacterDescriptions[index].field_18, gPremadeCharacterDescriptions[index].field_18);
+        }
+    }
+
+    gPremadeCharacterCount = gCustomPremadeCharacterDescriptions.size();
+}
+
+void premadeCharactersExit()
+{
+    gCustomPremadeCharacterDescriptions.clear();
+}
+
+static void premadeCharactersLocalizePath(char* path)
+{
+    if (compat_strnicmp(path, "premade\\", 8) != 0) {
+        return;
+    }
+
+    const char* language = settings.system.language.c_str();
+    if (compat_stricmp(language, ENGLISH) == 0) {
+        return;
+    }
+
+    char localizedPath[COMPAT_MAX_PATH];
+    strncpy(localizedPath, path, 8);
+    strcpy(localizedPath + 8, language);
+    strcpy(localizedPath + 8 + strlen(language), path + 7);
+
+    int fileSize;
+    if (dbGetFileSize(localizedPath, &fileSize) == 0) {
+        strcpy(path, localizedPath);
+    }
+}
+
+} // namespace fallout

@@ -6,6 +6,8 @@
 
 #include <zlib.h>
 
+namespace fallout {
+
 // TODO: This is compatibility cross-platform layer. Designed to have minimal
 // impact on the codebase. Remove once it's no longer needed.
 
@@ -27,9 +29,6 @@ char* compat_strlwr(char* string);
 char* compat_itoa(int value, char* buffer, int radix);
 void compat_splitpath(const char* path, char* drive, char* dir, char* fname, char* ext);
 void compat_makepath(char* path, const char* drive, const char* dir, const char* fname, const char* ext);
-int compat_read(int fileHandle, void* buf, unsigned int size);
-int compat_write(int fileHandle, const void* buf, unsigned int size);
-long compat_lseek(int fileHandle, long offset, int origin);
 long compat_tell(int fileHandle);
 long compat_filelength(int fd);
 int compat_mkdir(const char* path);
@@ -39,5 +38,9 @@ gzFile compat_gzopen(const char* path, const char* mode);
 int compat_remove(const char* path);
 int compat_rename(const char* oldFileName, const char* newFileName);
 void compat_windows_path_to_native(char* path);
+char* compat_strdup(const char* string);
+long getFileSize(FILE* stream);
+
+} // namespace fallout
 
 #endif /* PLATFORM_COMPAT_H */

@@ -1,30 +1,35 @@
 #include "elevator.h"
 
+#include <ctype.h>
+#include <string.h>
+
+#include <algorithm>
+
 #include "art.h"
-#include "core.h"
 #include "cycle.h"
 #include "debug.h"
 #include "draw.h"
 #include "game_mouse.h"
 #include "game_sound.h"
 #include "geometry.h"
+#include "input.h"
 #include "interface.h"
+#include "kb.h"
 #include "map.h"
 #include "pipboy.h"
 #include "scripts.h"
+#include "sfall_config.h"
+#include "svga.h"
 #include "window_manager.h"
 
-#include <ctype.h>
-#include <string.h>
+namespace fallout {
 
 // The maximum number of elevator levels.
 #define ELEVATOR_LEVEL_MAX (4)
 
-// NOTE: There are two variables which hold background data used in the
-// elevator window - [gElevatorBackgroundFrmData] and [gElevatorPanelFrmData].
-// For unknown reason they are using -1 to denote that they are not set
-// (instead of using NULL).
-#define ELEVATOR_BACKGROUND_NULL ((unsigned char*)(-1))
+// Max number of elevators that can be loaded from elevators.ini. This limit is
+// emposed by Sfall.
+#define ELEVATORS_MAX 50
 
 typedef enum ElevatorFrm {
     ELEVATOR_FRM_BUTTON_DOWN,
@@ -56,7 +61,7 @@ static const int gElevatorFrmIds[ELEVATOR_FRM_COUNT] = {
 };
 
 // 0x43E95C
-static const ElevatorBackground gElevatorBackgrounds[ELEVATOR_COUNT] = {
+static ElevatorBackground gElevatorBackgrounds[ELEVATORS_MAX] = {
     { 143, -1 },
     { 143, 150 },
     { 144, -1 },
@@ -86,7 +91,7 @@ static const ElevatorBackground gElevatorBackgrounds[ELEVATOR_COUNT] = {
 // Number of levels for eleveators.
 //
 // 0x43EA1C
-static const int gElevatorLevels[ELEVATOR_COUNT] = {
+static int gElevatorLevels[ELEVATORS_MAX] = {
     4,
     2,
     3,
@@ -114,7 +119,7 @@ static const int gElevatorLevels[ELEVATOR_COUNT] = {
 };
 
 // 0x43EA7C
-static const ElevatorDescription gElevatorDescriptions[ELEVATOR_COUNT][ELEVATOR_LEVEL_MAX] = {
+static ElevatorDescription gElevatorDescriptions[ELEVATORS_MAX][ELEVATOR_LEVEL_MAX] = {
     {
         { 14, 0, 18940 },
         { 14, 1, 18936 },
@@ -264,7 +269,7 @@ static const ElevatorDescription gElevatorDescriptions[ELEVATOR_COUNT][ELEVATOR_
 // NOTE: These values are also used as key bindings.
 //
 // 0x43EEFC
-static const char gElevatorLevelLabels[ELEVATOR_COUNT][ELEVATOR_LEVEL_MAX] = {
+static char gElevatorLevelLabels[ELEVATORS_MAX][ELEVATOR_LEVEL_MAX] = {
     { '1', '2', '3', '4' },
     { 'G', '1', '\0', '\0' },
     { '1', '2', '3', '\0' },
@@ -313,32 +318,8 @@ static const char* gElevatorSoundEffects[ELEVATOR_LEVEL_MAX - 1][ELEVATOR_LEVEL_
     },
 };
 
-// 0x570A2C
-static Size gElevatorFrmSizes[ELEVATOR_FRM_COUNT];
-
-// 0x570A44
-static int gElevatorBackgroundFrmWidth;
-
-// 0x570A48
-static int gElevatorBackgroundFrmHeight;
-
-// 0x570A4C
-static int gElevatorPanelFrmWidth;
-
-// 0x570A50
-static int gElevatorPanelFrmHeight;
-
 // 0x570A54
 static int gElevatorWindow;
-
-// 0x570A58
-static CacheEntry* gElevatorFrmHandles[ELEVATOR_FRM_COUNT];
-
-// 0x570A64
-static CacheEntry* gElevatorBackgroundFrmHandle;
-
-// 0x570A68
-static CacheEntry* gElevatorPanelFrmHandle;
 
 // 0x570A6C
 static unsigned char* gElevatorWindowBuffer;
@@ -346,24 +327,20 @@ static unsigned char* gElevatorWindowBuffer;
 // 0x570A70
 static bool gElevatorWindowIsoWasEnabled;
 
-// 0x570A74
-static unsigned char* gElevatorFrmData[ELEVATOR_FRM_COUNT];
-
-// 0x570A80
-static unsigned char* gElevatorBackgroundFrmData;
-
-// 0x570A84
-static unsigned char* gElevatorPanelFrmData;
+static FrmImage _elevatorFrmImages[ELEVATOR_FRM_COUNT];
+static FrmImage _elevatorBackgroundFrmImage;
+static FrmImage _elevatorPanelFrmImage;
 
 // Presents elevator dialog for player to pick a desired level.
 //
 // 0x43EF5C
 int elevatorSelectLevel(int elevator, int* mapPtr, int* elevationPtr, int* tilePtr)
 {
-    if (elevator < 0 || elevator >= ELEVATOR_COUNT) {
+    if (elevator < 0 || elevator >= ELEVATORS_MAX) {
         return -1;
     }
 
+    // SFALL
     if (elevatorWindowInit(elevator) == -1) {
         return -1;
     }
@@ -403,21 +380,23 @@ int elevatorSelectLevel(int elevator, int* mapPtr, int* elevationPtr, int* tileP
 
     debugPrint("\n the start elev level %d\n", *elevationPtr);
 
-    int v18 = (gElevatorFrmSizes[ELEVATOR_FRM_GAUGE].width * gElevatorFrmSizes[ELEVATOR_FRM_GAUGE].height) / 13;
+    int v18 = (_elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth() * _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getHeight()) / 13;
     float v42 = 12.0f / (float)(gElevatorLevels[elevator] - 1);
     blitBufferToBuffer(
-        gElevatorFrmData[ELEVATOR_FRM_GAUGE] + v18 * (int)((float)(*elevationPtr) * v42),
-        gElevatorFrmSizes[ELEVATOR_FRM_GAUGE].width,
-        gElevatorFrmSizes[ELEVATOR_FRM_GAUGE].height / 13,
-        gElevatorFrmSizes[ELEVATOR_FRM_GAUGE].width,
-        gElevatorWindowBuffer + gElevatorBackgroundFrmWidth * 41 + 121,
-        gElevatorBackgroundFrmWidth);
+        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getData() + v18 * (int)((float)(*elevationPtr) * v42),
+        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
+        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getHeight() / 13,
+        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
+        gElevatorWindowBuffer + _elevatorBackgroundFrmImage.getWidth() * 41 + 121,
+        _elevatorBackgroundFrmImage.getWidth());
     windowRefresh(gElevatorWindow);
 
     bool done = false;
     int keyCode;
     while (!done) {
-        keyCode = _get_input();
+        sharedFpsLimiter.mark();
+
+        keyCode = inputGetInput();
         if (keyCode == KEY_ESCAPE) {
             done = true;
         }
@@ -433,6 +412,9 @@ int elevatorSelectLevel(int elevator, int* mapPtr, int* elevationPtr, int* tileP
                 done = true;
             }
         }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
     }
 
     if (keyCode != KEY_ESCAPE) {
@@ -457,23 +439,28 @@ int elevatorSelectLevel(int elevator, int* mapPtr, int* elevationPtr, int* tileP
             float v41 = (float)keyCode * v42;
             float v44 = (float)(*elevationPtr) * v42;
             do {
-                unsigned int tick = _get_time();
+                sharedFpsLimiter.mark();
+
+                unsigned int tick = getTicks();
                 v44 += v43;
                 blitBufferToBuffer(
-                    gElevatorFrmData[ELEVATOR_FRM_GAUGE] + v18 * (int)v44,
-                    gElevatorFrmSizes[ELEVATOR_FRM_GAUGE].width,
-                    gElevatorFrmSizes[ELEVATOR_FRM_GAUGE].height / 13,
-                    gElevatorFrmSizes[ELEVATOR_FRM_GAUGE].width,
-                    gElevatorWindowBuffer + gElevatorBackgroundFrmWidth * 41 + 121,
-                    gElevatorBackgroundFrmWidth);
+                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getData() + v18 * (int)v44,
+                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
+                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getHeight() / 13,
+                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
+                    gElevatorWindowBuffer + _elevatorBackgroundFrmImage.getWidth() * 41 + 121,
+                    _elevatorBackgroundFrmImage.getWidth());
 
                 windowRefresh(gElevatorWindow);
 
                 while (getTicksSince(tick) < delay) {
                 }
+
+                renderPresent();
+                sharedFpsLimiter.throttle();
             } while ((v43 <= 0.0 || v44 < v41) && (v43 > 0.0 || v44 > v41));
 
-            coreDelayProcessingEvents(200);
+            inputPauseForTocks(200);
         }
     }
 
@@ -503,16 +490,15 @@ static int elevatorWindowInit(int elevator)
 
     int index;
     for (index = 0; index < ELEVATOR_FRM_COUNT; index++) {
-        int fid = buildFid(6, gElevatorFrmIds[index], 0, 0, 0);
-        gElevatorFrmData[index] = artLockFrameDataReturningSize(fid, &(gElevatorFrmHandles[index]), &(gElevatorFrmSizes[index].width), &(gElevatorFrmSizes[index].height));
-        if (gElevatorFrmData[index] == NULL) {
+        int fid = buildFid(OBJ_TYPE_INTERFACE, gElevatorFrmIds[index], 0, 0, 0);
+        if (!_elevatorFrmImages[index].lock(fid)) {
             break;
         }
     }
 
     if (index != ELEVATOR_FRM_COUNT) {
         for (int reversedIndex = index - 1; reversedIndex >= 0; reversedIndex--) {
-            artUnlock(gElevatorFrmHandles[reversedIndex]);
+            _elevatorFrmImages[reversedIndex].unlock();
         }
 
         if (gElevatorWindowIsoWasEnabled) {
@@ -523,40 +509,28 @@ static int elevatorWindowInit(int elevator)
         gameMouseSetCursor(MOUSE_CURSOR_ARROW);
         return -1;
     }
-
-    gElevatorPanelFrmData = ELEVATOR_BACKGROUND_NULL;
-    gElevatorBackgroundFrmData = ELEVATOR_BACKGROUND_NULL;
 
     const ElevatorBackground* elevatorBackground = &(gElevatorBackgrounds[elevator]);
     bool backgroundsLoaded = true;
 
-    int backgroundFid = buildFid(6, elevatorBackground->backgroundFrmId, 0, 0, 0);
-    gElevatorBackgroundFrmData = artLockFrameDataReturningSize(backgroundFid, &gElevatorBackgroundFrmHandle, &gElevatorBackgroundFrmWidth, &gElevatorBackgroundFrmHeight);
-    if (gElevatorBackgroundFrmData != NULL) {
+    int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, elevatorBackground->backgroundFrmId, 0, 0, 0);
+    if (_elevatorBackgroundFrmImage.lock(backgroundFid)) {
         if (elevatorBackground->panelFrmId != -1) {
-            int panelFid = buildFid(6, elevatorBackground->panelFrmId, 0, 0, 0);
-            gElevatorPanelFrmData = artLockFrameDataReturningSize(panelFid, &gElevatorPanelFrmHandle, &gElevatorPanelFrmWidth, &gElevatorPanelFrmHeight);
-            if (gElevatorPanelFrmData == NULL) {
-                gElevatorPanelFrmData = ELEVATOR_BACKGROUND_NULL;
+            int panelFid = buildFid(OBJ_TYPE_INTERFACE, elevatorBackground->panelFrmId, 0, 0, 0);
+            if (!_elevatorPanelFrmImage.lock(panelFid)) {
                 backgroundsLoaded = false;
             }
         }
     } else {
-        gElevatorBackgroundFrmData = ELEVATOR_BACKGROUND_NULL;
         backgroundsLoaded = false;
     }
 
     if (!backgroundsLoaded) {
-        if (gElevatorBackgroundFrmData != ELEVATOR_BACKGROUND_NULL) {
-            artUnlock(gElevatorBackgroundFrmHandle);
-        }
-
-        if (gElevatorPanelFrmData != ELEVATOR_BACKGROUND_NULL) {
-            artUnlock(gElevatorPanelFrmHandle);
-        }
+        _elevatorBackgroundFrmImage.unlock();
+        _elevatorPanelFrmImage.unlock();
 
         for (int index = 0; index < ELEVATOR_FRM_COUNT; index++) {
-            artUnlock(gElevatorFrmHandles[index]);
+            _elevatorFrmImages[index].unlock();
         }
 
         if (gElevatorWindowIsoWasEnabled) {
@@ -568,26 +542,21 @@ static int elevatorWindowInit(int elevator)
         return -1;
     }
 
-    int elevatorWindowX = (screenGetWidth() - gElevatorBackgroundFrmWidth) / 2;
-    int elevatorWindowY = (screenGetHeight() - INTERFACE_BAR_HEIGHT - 1 - gElevatorBackgroundFrmHeight) / 2;
+    int elevatorWindowX = (screenGetWidth() - _elevatorBackgroundFrmImage.getWidth()) / 2;
+    int elevatorWindowY = (screenGetHeight() - INTERFACE_BAR_HEIGHT - 1 - _elevatorBackgroundFrmImage.getHeight()) / 2;
     gElevatorWindow = windowCreate(
         elevatorWindowX,
         elevatorWindowY,
-        gElevatorBackgroundFrmWidth,
-        gElevatorBackgroundFrmHeight,
+        _elevatorBackgroundFrmImage.getWidth(),
+        _elevatorBackgroundFrmImage.getHeight(),
         256,
-        WINDOW_FLAG_0x10 | WINDOW_FLAG_0x02);
+        WINDOW_MODAL | WINDOW_DONT_MOVE_TOP);
     if (gElevatorWindow == -1) {
-        if (gElevatorBackgroundFrmData != ELEVATOR_BACKGROUND_NULL) {
-            artUnlock(gElevatorBackgroundFrmHandle);
-        }
-
-        if (gElevatorPanelFrmData != ELEVATOR_BACKGROUND_NULL) {
-            artUnlock(gElevatorPanelFrmHandle);
-        }
+        _elevatorBackgroundFrmImage.unlock();
+        _elevatorPanelFrmImage.unlock();
 
         for (int index = 0; index < ELEVATOR_FRM_COUNT; index++) {
-            artUnlock(gElevatorFrmHandles[index]);
+            _elevatorFrmImages[index].unlock();
         }
 
         if (gElevatorWindowIsoWasEnabled) {
@@ -600,15 +569,15 @@ static int elevatorWindowInit(int elevator)
     }
 
     gElevatorWindowBuffer = windowGetBuffer(gElevatorWindow);
-    memcpy(gElevatorWindowBuffer, (unsigned char*)gElevatorBackgroundFrmData, gElevatorBackgroundFrmWidth * gElevatorBackgroundFrmHeight);
+    memcpy(gElevatorWindowBuffer, _elevatorBackgroundFrmImage.getData(), _elevatorBackgroundFrmImage.getWidth() * _elevatorBackgroundFrmImage.getHeight());
 
-    if (gElevatorPanelFrmData != ELEVATOR_BACKGROUND_NULL) {
-        blitBufferToBuffer((unsigned char*)gElevatorPanelFrmData,
-            gElevatorPanelFrmWidth,
-            gElevatorPanelFrmHeight,
-            gElevatorPanelFrmWidth,
-            gElevatorWindowBuffer + gElevatorBackgroundFrmWidth * (gElevatorBackgroundFrmHeight - gElevatorPanelFrmHeight),
-            gElevatorBackgroundFrmWidth);
+    if (_elevatorPanelFrmImage.isLocked()) {
+        blitBufferToBuffer(_elevatorPanelFrmImage.getData(),
+            _elevatorPanelFrmImage.getWidth(),
+            _elevatorPanelFrmImage.getHeight(),
+            _elevatorPanelFrmImage.getWidth(),
+            gElevatorWindowBuffer + _elevatorBackgroundFrmImage.getWidth() * (_elevatorBackgroundFrmImage.getHeight() - _elevatorPanelFrmImage.getHeight()),
+            _elevatorBackgroundFrmImage.getWidth());
     }
 
     int y = 40;
@@ -616,14 +585,14 @@ static int elevatorWindowInit(int elevator)
         int btn = buttonCreate(gElevatorWindow,
             13,
             y,
-            gElevatorFrmSizes[ELEVATOR_FRM_BUTTON_DOWN].width,
-            gElevatorFrmSizes[ELEVATOR_FRM_BUTTON_DOWN].height,
+            _elevatorFrmImages[ELEVATOR_FRM_BUTTON_DOWN].getWidth(),
+            _elevatorFrmImages[ELEVATOR_FRM_BUTTON_DOWN].getHeight(),
             -1,
             -1,
             -1,
             500 + level,
-            gElevatorFrmData[ELEVATOR_FRM_BUTTON_UP],
-            gElevatorFrmData[ELEVATOR_FRM_BUTTON_DOWN],
+            _elevatorFrmImages[ELEVATOR_FRM_BUTTON_UP].getData(),
+            _elevatorFrmImages[ELEVATOR_FRM_BUTTON_DOWN].getData(),
             NULL,
             BUTTON_FLAG_TRANSPARENT);
         if (btn != -1) {
@@ -640,16 +609,11 @@ static void elevatorWindowFree()
 {
     windowDestroy(gElevatorWindow);
 
-    if (gElevatorBackgroundFrmData != ELEVATOR_BACKGROUND_NULL) {
-        artUnlock(gElevatorBackgroundFrmHandle);
-    }
-
-    if (gElevatorPanelFrmData != ELEVATOR_BACKGROUND_NULL) {
-        artUnlock(gElevatorPanelFrmHandle);
-    }
+    _elevatorBackgroundFrmImage.unlock();
+    _elevatorPanelFrmImage.unlock();
 
     for (int index = 0; index < ELEVATOR_FRM_COUNT; index++) {
-        artUnlock(gElevatorFrmHandles[index]);
+        _elevatorFrmImages[index].unlock();
     }
 
     scriptsEnable();
@@ -681,3 +645,67 @@ static int elevatorGetLevelFromKeyCode(int elevator, int keyCode)
     }
     return 0;
 }
+
+void elevatorsInit()
+{
+    char* elevatorsFileName;
+    configGetString(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_ELEVATORS_FILE_KEY, &elevatorsFileName);
+    if (elevatorsFileName != NULL && *elevatorsFileName == '\0') {
+        elevatorsFileName = NULL;
+    }
+
+    if (elevatorsFileName != NULL) {
+        Config elevatorsConfig;
+        if (configInit(&elevatorsConfig)) {
+            if (configRead(&elevatorsConfig, elevatorsFileName, false)) {
+                char sectionKey[4];
+                char key[32];
+                for (int index = 0; index < ELEVATORS_MAX; index++) {
+                    snprintf(sectionKey, sizeof(sectionKey), "%d", index);
+
+                    if (index >= ELEVATOR_COUNT) {
+                        int levels = 0;
+                        configGetInt(&elevatorsConfig, sectionKey, "ButtonCount", &levels);
+                        gElevatorLevels[index] = std::clamp(levels, 2, ELEVATOR_LEVEL_MAX);
+                    }
+
+                    configGetInt(&elevatorsConfig, sectionKey, "MainFrm", &(gElevatorBackgrounds[index].backgroundFrmId));
+                    configGetInt(&elevatorsConfig, sectionKey, "ButtonsFrm", &(gElevatorBackgrounds[index].panelFrmId));
+
+                    for (int level = 0; level < ELEVATOR_LEVEL_MAX; level++) {
+                        snprintf(key, sizeof(key), "ID%d", level + 1);
+                        configGetInt(&elevatorsConfig, sectionKey, key, &(gElevatorDescriptions[index][level].map));
+
+                        snprintf(key, sizeof(key), "Elevation%d", level + 1);
+                        configGetInt(&elevatorsConfig, sectionKey, key, &(gElevatorDescriptions[index][level].elevation));
+
+                        snprintf(key, sizeof(key), "Tile%d", level + 1);
+                        configGetInt(&elevatorsConfig, sectionKey, key, &(gElevatorDescriptions[index][level].tile));
+                    }
+                }
+
+                // NOTE: Sfall implementation is slightly different. It uses one
+                // loop and stores `type` value in a separate lookup table. This
+                // value is then used in the certain places to remap from
+                // requested elevator to the new one.
+                for (int index = 0; index < ELEVATORS_MAX; index++) {
+                    snprintf(sectionKey, sizeof(sectionKey), "%d", index);
+
+                    int type;
+                    if (configGetInt(&elevatorsConfig, sectionKey, "Image", &type)) {
+                        type = std::clamp(type, 0, ELEVATORS_MAX - 1);
+                        if (index != type) {
+                            memcpy(&(gElevatorBackgrounds[index]), &(gElevatorBackgrounds[type]), sizeof(*gElevatorBackgrounds));
+                            memcpy(&(gElevatorLevels[index]), &(gElevatorLevels[type]), sizeof(*gElevatorLevels));
+                            memcpy(&(gElevatorLevelLabels[index]), &(gElevatorLevelLabels[type]), sizeof(*gElevatorLevelLabels));
+                        }
+                    }
+                }
+            }
+
+            configFree(&elevatorsConfig);
+        }
+    }
+}
+
+} // namespace fallout

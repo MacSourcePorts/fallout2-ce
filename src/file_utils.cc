@@ -2,13 +2,18 @@
 // of regular __usercall.
 
 #include "file_utils.h"
-#include "platform_compat.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <zlib.h>
 
-#include <filesystem>
+#include <vector>
+
+#include "platform_compat.h"
+
+namespace fallout {
+
+static void fileCopy(const char* existingFilePath, const char* newFilePath);
 
 // 0x452740
 int fileCopyDecompressed(const char* existingFilePath, const char* newFilePath)
@@ -51,7 +56,7 @@ int fileCopyDecompressed(const char* existingFilePath, const char* newFilePath)
             return -1;
         }
     } else {
-        fileCopy(existingFilePath, newFilePath, true);
+        fileCopy(existingFilePath, newFilePath);
     }
 
     return 0;
@@ -74,7 +79,7 @@ int fileCopyCompressed(const char* existingFilePath, const char* newFilePath)
         // Source file is already gzipped, there is no need to do anything
         // besides copying.
         fclose(inStream);
-        fileCopy(existingFilePath, newFilePath, true);
+        fileCopy(existingFilePath, newFilePath);
     } else {
         gzFile outStream = compat_gzopen(newFilePath, "wb");
         if (outStream == NULL) {
@@ -137,15 +142,13 @@ int _gzdecompress_file(const char* existingFilePath, const char* newFilePath)
         gzclose(gzstream);
         fclose(stream);
     } else {
-        fileCopy(existingFilePath, newFilePath, true);
+        fileCopy(existingFilePath, newFilePath);
     }
 
     return 0;
 }
 
-// Modelled as replacement for `CopyFileA`, but `overwrite` is the opposite to
-// `bFailIfExists` param. Update callers accordingly.
-void fileCopy(const char* existingFilePath, const char* newFilePath, bool overwrite)
+static void fileCopy(const char* existingFilePath, const char* newFilePath)
 {
     char nativeExistingFilePath[COMPAT_MAX_PATH];
     strcpy(nativeExistingFilePath, existingFilePath);
@@ -155,9 +158,34 @@ void fileCopy(const char* existingFilePath, const char* newFilePath, bool overwr
     strcpy(nativeNewFilePath, newFilePath);
     compat_windows_path_to_native(nativeNewFilePath);
 
-    std::error_code ec;
-    std::filesystem::copy_options options = overwrite
-        ? std::filesystem::copy_options::overwrite_existing
-        : std::filesystem::copy_options::none;
-    std::filesystem::copy_file(std::filesystem::path(nativeExistingFilePath), std::filesystem::path(nativeNewFilePath), options, ec);
+    FILE* in = fopen(nativeExistingFilePath, "rb");
+    FILE* out = fopen(nativeNewFilePath, "wb");
+    if (in != NULL && out != NULL) {
+        std::vector<unsigned char> buffer(0xFFFF);
+
+        size_t bytesRead;
+        while ((bytesRead = fread(buffer.data(), sizeof(*buffer.data()), buffer.size(), in)) > 0) {
+            size_t bytesWritten;
+            size_t offset = 0;
+            while ((bytesWritten = fwrite(buffer.data() + offset, sizeof(*buffer.data()), bytesRead, out)) > 0) {
+                bytesRead -= bytesWritten;
+                offset += bytesWritten;
+            }
+
+            if (bytesWritten < 0) {
+                bytesRead = -1;
+                break;
+            }
+        }
+    }
+
+    if (in != NULL) {
+        fclose(in);
+    }
+
+    if (out != NULL) {
+        fclose(out);
+    }
 }
+
+} // namespace fallout

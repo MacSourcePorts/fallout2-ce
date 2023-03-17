@@ -1,7 +1,23 @@
 #ifndef DICTIONARY_H
 #define DICTIONARY_H
 
+#include <stdio.h>
+
 #include "memory_defs.h"
+
+namespace fallout {
+
+typedef int(DictionaryReadProc)(FILE* stream, void* buffer, unsigned int size, int a4);
+typedef int(DictionaryWriteProc)(FILE* stream, void* buffer, unsigned int size, int a4);
+
+// NOTE: Last unnamed fields are likely seek, tell, and filelength.
+typedef struct DictionaryIO {
+    DictionaryReadProc* readProc;
+    DictionaryWriteProc* writeProc;
+    int field_8;
+    int field_C;
+    int field_10;
+} DictionaryIO;
 
 // A tuple containing individual key-value pair of a dictionary.
 typedef struct DictionaryEntry {
@@ -27,22 +43,28 @@ typedef struct Dictionary {
     // The size of the dictionary values in bytes.
     size_t valueSize;
 
-    int field_10;
-    int field_14;
-    int field_18;
-    int field_1C;
-    int field_20;
+    // IO callbacks.
+    DictionaryIO io;
 
     // The array of key-value pairs.
     DictionaryEntry* entries;
 } Dictionary;
 
-int dictionaryInit(Dictionary* dictionary, int initialCapacity, size_t valueSize, void* a4);
+int dictionaryInit(Dictionary* dictionary, int initialCapacity, size_t valueSize, DictionaryIO* io);
 int dictionarySetCapacity(Dictionary* dictionary, int newCapacity);
 int dictionaryFree(Dictionary* dictionary);
 int dictionaryGetIndexByKey(Dictionary* dictionary, const char* key);
 int dictionaryAddValue(Dictionary* dictionary, const char* key, const void* value);
 int dictionaryRemoveValue(Dictionary* dictionary, const char* key);
+int dictionaryCopy(Dictionary* dest, Dictionary* src);
+int dictionaryReadInt(FILE* stream, int* valuePtr);
+int dictionaryReadHeader(FILE* stream, Dictionary* dictionary);
+int dictionaryLoad(FILE* stream, Dictionary* dictionary, int a3);
+int dictionaryWriteInt(FILE* stream, int value);
+int dictionaryWriteHeader(FILE* stream, Dictionary* dictionary);
+int dictionaryWrite(FILE* stream, Dictionary* dictionary, int a3);
 void dictionarySetMemoryProcs(MallocProc* mallocProc, ReallocProc* reallocProc, FreeProc* freeProc);
+
+} // namespace fallout
 
 #endif /* DICTIONARY_H */

@@ -1,8 +1,9 @@
 #include "perk.h"
 
+#include <stdio.h>
+
 #include "debug.h"
 #include "game.h"
-#include "game_config.h"
 #include "memory.h"
 #include "message.h"
 #include "object.h"
@@ -11,7 +12,7 @@
 #include "skill.h"
 #include "stat.h"
 
-#include <stdio.h>
+namespace fallout {
 
 typedef struct PerkDescription {
     char* name;
@@ -191,7 +192,7 @@ int perksInit()
     }
 
     char path[COMPAT_MAX_PATH];
-    sprintf(path, "%s%s", asc_5186C8, "perk.msg");
+    snprintf(path, sizeof(path), "%s%s", asc_5186C8, "perk.msg");
 
     if (!messageListLoad(&gPerksMessageList, path)) {
         return -1;
@@ -211,6 +212,8 @@ int perksInit()
         }
     }
 
+    messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_PERK, &gPerksMessageList);
+
     return 0;
 }
 
@@ -223,6 +226,7 @@ void perksReset()
 // 0x4966B8
 void perksExit()
 {
+    messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_PERK, nullptr);
     messageListFree(&gPerksMessageList);
 
     if (gPartyMemberPerkRanks != NULL) {
@@ -535,7 +539,7 @@ int perkGetFrmId(int perk)
 // 0x496BFC
 void perkAddEffect(Object* critter, int perk)
 {
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         debugPrint("\nERROR: perk_add_effect: Was called on non-critter!");
         return;
     }
@@ -575,7 +579,7 @@ void perkAddEffect(Object* critter, int perk)
 // 0x496CE0
 void perkRemoveEffect(Object* critter, int perk)
 {
-    if ((critter->pid >> 24) != OBJ_TYPE_CRITTER) {
+    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
         debugPrint("\nERROR: perk_remove_effect: Was called on non-critter!");
         return;
     }
@@ -713,3 +717,5 @@ int perkGetSkillModifier(Object* critter, int skill)
 
     return modifier;
 }
+
+} // namespace fallout

@@ -1,16 +1,19 @@
 #include "xfile.h"
 
-#include "file_find.h"
-
 #include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #ifdef _WIN32
 #include <direct.h>
 #else
 #include <unistd.h>
 #endif
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+
+#include "file_find.h"
+
+namespace fallout {
 
 typedef enum XFileEnumerationEntryType {
     XFILE_ENUMERATION_ENTRY_TYPE_FILE,
@@ -92,7 +95,7 @@ XFile* xfileOpen(const char* filePath, const char* mode)
         }
 
         stream->type = XFILE_TYPE_FILE;
-        sprintf(path, "%s", filePath);
+        snprintf(path, sizeof(path), "%s", filePath);
     } else {
         // [filePath] is a relative path. Loop thru open xbases and attempt to
         // open [filePath] from appropriate xbase.
@@ -103,12 +106,12 @@ XFile* xfileOpen(const char* filePath, const char* mode)
                 stream->dfile = dfileOpen(curr->dbase, filePath, mode);
                 if (stream->dfile != NULL) {
                     stream->type = XFILE_TYPE_DFILE;
-                    sprintf(path, "%s", filePath);
+                    snprintf(path, sizeof(path), "%s", filePath);
                     break;
                 }
             } else {
                 // Build path relative to directory-based xbase.
-                sprintf(path, "%s\\%s", curr->path, filePath);
+                snprintf(path, sizeof(path), "%s\\%s", curr->path, filePath);
 
                 // Attempt to open plain stream.
                 stream->file = compat_fopen(path, mode);
@@ -130,7 +133,7 @@ XFile* xfileOpen(const char* filePath, const char* mode)
             }
 
             stream->type = XFILE_TYPE_FILE;
-            sprintf(path, "%s", filePath);
+            snprintf(path, sizeof(path), "%s", filePath);
         }
     }
 
@@ -441,7 +444,7 @@ long xfileGetSize(XFile* stream)
         fileSize = 0;
         break;
     default:
-        fileSize = compat_filelength(fileno(stream->file));
+        fileSize = getFileSize(stream->file);
         break;
     }
 
@@ -512,7 +515,7 @@ bool xbaseOpen(const char* path)
 
     memset(xbase, 0, sizeof(*xbase));
 
-    xbase->path = strdup(path);
+    xbase->path = compat_strdup(path);
     if (xbase->path == NULL) {
         free(xbase);
         return false;
@@ -617,7 +620,7 @@ static bool xlistEnumerate(const char* pattern, XListEnumerationHandler* handler
             }
         } else {
             char path[COMPAT_MAX_PATH];
-            sprintf(path, "%s\\%s", xbase->path, pattern);
+            snprintf(path, sizeof(path), "%s\\%s", xbase->path, pattern);
             compat_windows_path_to_native(path);
 
             if (fileFindFirst(path, &directoryFileFindData)) {
@@ -719,7 +722,7 @@ static int xbaseMakeDirectory(const char* filePath)
         XBase* curr = gXbaseHead;
         while (curr != NULL) {
             if (!curr->isDbase) {
-                sprintf(path, "%s\\%s", curr->path, filePath);
+                snprintf(path, sizeof(path), "%s\\%s", curr->path, filePath);
                 break;
             }
             curr = curr->next;
@@ -728,7 +731,7 @@ static int xbaseMakeDirectory(const char* filePath)
         if (curr == NULL) {
             // Either there are no directory-based xbase, or there are no open
             // xbases at all - resolve path against current working directory.
-            sprintf(path, "%s\\%s", workingDirectory, filePath);
+            snprintf(path, sizeof(path), "%s\\%s", workingDirectory, filePath);
         }
     }
 
@@ -814,7 +817,7 @@ static bool xlistEnumerateHandler(XListEnumerationContext* context)
 
     xlist->fileNames = fileNames;
 
-    fileNames[xlist->fileNamesLength] = strdup(context->name);
+    fileNames[xlist->fileNamesLength] = compat_strdup(context->name);
     if (fileNames[xlist->fileNamesLength] == NULL) {
         xlistFree(xlist);
         xlist->fileNamesLength = -1;
@@ -825,3 +828,5 @@ static bool xlistEnumerateHandler(XListEnumerationContext* context)
 
     return true;
 }
+
+} // namespace fallout

@@ -1,19 +1,25 @@
 #include "display_monitor.h"
 
+#include <string.h>
+
+#include <fstream>
+
 #include "art.h"
 #include "color.h"
 #include "combat.h"
-#include "core.h"
 #include "draw.h"
 #include "game_mouse.h"
 #include "game_sound.h"
 #include "geometry.h"
+#include "input.h"
 #include "interface.h"
 #include "memory.h"
+#include "sfall_config.h"
+#include "svga.h"
 #include "text_font.h"
 #include "window_manager.h"
 
-#include <string.h>
+namespace fallout {
 
 // The maximum number of lines display monitor can hold. Once this value
 // is reached earlier messages are thrown away.
@@ -24,7 +30,7 @@
 
 #define DISPLAY_MONITOR_X (23)
 #define DISPLAY_MONITOR_Y (24)
-#define DISPLAY_MONITOR_WIDTH (167)
+#define DISPLAY_MONITOR_WIDTH (167 + gInterfaceBarContentOffset)
 #define DISPLAY_MONITOR_HEIGHT (60)
 
 #define DISPLAY_MONITOR_HALF_HEIGHT (DISPLAY_MONITOR_HEIGHT / 2)
@@ -33,6 +39,7 @@
 
 #define DISPLAY_MONITOR_BEEP_DELAY (500U)
 
+static void display_clear();
 static void displayMonitorRefresh();
 static void displayMonitorScrollUpOnMouseDown(int btn, int keyCode);
 static void displayMonitorScrollDownOnMouseDown(int btn, int keyCode);
@@ -40,18 +47,19 @@ static void displayMonitorScrollUpOnMouseEnter(int btn, int keyCode);
 static void displayMonitorScrollDownOnMouseEnter(int btn, int keyCode);
 static void displayMonitorOnMouseExit(int btn, int keyCode);
 
+static void consoleFileInit();
+static void consoleFileReset();
+static void consoleFileExit();
+static void consoleFileAddMessage(const char* message);
+static void consoleFileFlush();
+
 // 0x51850C
 static bool gDisplayMonitorInitialized = false;
 
 // The rectangle that display monitor occupies in the main interface window.
 //
 // 0x518510
-static const Rect gDisplayMonitorRect = {
-    DISPLAY_MONITOR_X,
-    DISPLAY_MONITOR_Y,
-    DISPLAY_MONITOR_X + DISPLAY_MONITOR_WIDTH - 1,
-    DISPLAY_MONITOR_Y + DISPLAY_MONITOR_HEIGHT - 1,
-};
+static Rect gDisplayMonitorRect;
 
 // 0x518520
 static int gDisplayMonitorScrollDownButton = -1;
@@ -86,10 +94,20 @@ static int _disp_start;
 // 0x56FB58
 static unsigned int gDisplayMonitorLastBeepTimestamp;
 
+static std::ofstream gConsoleFileStream;
+static int gConsoleFilePrintCount = 0;
+
 // 0x431610
 int displayMonitorInit()
 {
     if (!gDisplayMonitorInitialized) {
+        gDisplayMonitorRect = {
+            DISPLAY_MONITOR_X,
+            DISPLAY_MONITOR_Y,
+            DISPLAY_MONITOR_X + DISPLAY_MONITOR_WIDTH - 1,
+            DISPLAY_MONITOR_Y + DISPLAY_MONITOR_HEIGHT - 1,
+        };
+
         int oldFont = fontGetCurrent();
         fontSetCurrent(DISPLAY_MONITOR_FONT);
 
@@ -104,24 +122,32 @@ int displayMonitorInit()
             return -1;
         }
 
-        CacheEntry* backgroundFrmHandle;
-        int backgroundFid = buildFid(6, 16, 0, 0, 0);
-        Art* backgroundFrm = artLock(backgroundFid, &backgroundFrmHandle);
-        if (backgroundFrm == NULL) {
-            internal_free(gDisplayMonitorBackgroundFrmData);
-            return -1;
+        if (gInterfaceBarIsCustom) {
+            _intface_full_width = gInterfaceBarWidth;
+            blitBufferToBuffer(customInterfaceBarGetBackgroundImageData() + gInterfaceBarWidth * DISPLAY_MONITOR_Y + DISPLAY_MONITOR_X,
+                DISPLAY_MONITOR_WIDTH,
+                DISPLAY_MONITOR_HEIGHT,
+                gInterfaceBarWidth,
+                gDisplayMonitorBackgroundFrmData,
+                DISPLAY_MONITOR_WIDTH);
+        } else {
+            FrmImage backgroundFrmImage;
+            int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, 16, 0, 0, 0);
+            if (!backgroundFrmImage.lock(backgroundFid)) {
+                internal_free(gDisplayMonitorBackgroundFrmData);
+                return -1;
+            }
+
+            unsigned char* backgroundFrmData = backgroundFrmImage.getData();
+            _intface_full_width = backgroundFrmImage.getWidth();
+
+            blitBufferToBuffer(backgroundFrmData + _intface_full_width * DISPLAY_MONITOR_Y + DISPLAY_MONITOR_X,
+                DISPLAY_MONITOR_WIDTH,
+                DISPLAY_MONITOR_HEIGHT,
+                _intface_full_width,
+                gDisplayMonitorBackgroundFrmData,
+                DISPLAY_MONITOR_WIDTH);
         }
-
-        unsigned char* backgroundFrmData = artGetFrameData(backgroundFrm, 0, 0);
-        _intface_full_width = artGetWidth(backgroundFrm, 0, 0);
-        blitBufferToBuffer(backgroundFrmData + _intface_full_width * DISPLAY_MONITOR_Y + DISPLAY_MONITOR_X,
-            DISPLAY_MONITOR_WIDTH,
-            DISPLAY_MONITOR_HEIGHT,
-            _intface_full_width,
-            gDisplayMonitorBackgroundFrmData,
-            DISPLAY_MONITOR_WIDTH);
-
-        artUnlock(backgroundFrmHandle);
 
         gDisplayMonitorScrollUpButton = buttonCreate(gInterfaceBarWindow,
             DISPLAY_MONITOR_X,
@@ -168,14 +194,11 @@ int displayMonitorInit()
         gDisplayMonitorEnabled = true;
         gDisplayMonitorInitialized = true;
 
-        for (int index = 0; index < gDisplayMonitorLinesCapacity; index++) {
-            gDisplayMonitorLines[index][0] = '\0';
-        }
+        // NOTE: Uninline.
+        display_clear();
 
-        _disp_start = 0;
-        _disp_curr = 0;
-
-        displayMonitorRefresh();
+        // SFALL
+        consoleFileInit();
     }
 
     return 0;
@@ -184,15 +207,12 @@ int displayMonitorInit()
 // 0x431800
 int displayMonitorReset()
 {
-    if (gDisplayMonitorInitialized) {
-        for (int index = 0; index < gDisplayMonitorLinesCapacity; index++) {
-            gDisplayMonitorLines[index][0] = '\0';
-        }
+    // NOTE: Uninline.
+    display_clear();
 
-        _disp_start = 0;
-        _disp_curr = 0;
-        displayMonitorRefresh();
-    }
+    // SFALL
+    consoleFileReset();
+
     return 0;
 }
 
@@ -200,6 +220,9 @@ int displayMonitorReset()
 void displayMonitorExit()
 {
     if (gDisplayMonitorInitialized) {
+        // SFALL
+        consoleFileExit();
+
         internal_free(gDisplayMonitorBackgroundFrmData);
         gDisplayMonitorInitialized = false;
     }
@@ -211,6 +234,9 @@ void displayMonitorAddMessage(char* str)
     if (!gDisplayMonitorInitialized) {
         return;
     }
+
+    // SFALL
+    consoleFileAddMessage(str);
 
     int oldFont = fontGetCurrent();
     fontSetCurrent(DISPLAY_MONITOR_FONT);
@@ -293,6 +319,24 @@ void displayMonitorAddMessage(char* str)
     fontSetCurrent(oldFont);
     _disp_curr = _disp_start;
     displayMonitorRefresh();
+}
+
+// NOTE: Inlined.
+//
+// 0x431A2C
+static void display_clear()
+{
+    int index;
+
+    if (gDisplayMonitorInitialized) {
+        for (index = 0; index < gDisplayMonitorLinesCapacity; index++) {
+            gDisplayMonitorLines[index][0] = '\0';
+        }
+
+        _disp_start = 0;
+        _disp_curr = 0;
+        displayMonitorRefresh();
+    }
 }
 
 // 0x431A78
@@ -389,3 +433,53 @@ void displayMonitorEnable()
         gDisplayMonitorEnabled = true;
     }
 }
+
+static void consoleFileInit()
+{
+    char* consoleFilePath;
+    configGetString(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_CONSOLE_OUTPUT_FILE_KEY, &consoleFilePath);
+    if (consoleFilePath != NULL && *consoleFilePath == '\0') {
+        consoleFilePath = NULL;
+    }
+
+    if (consoleFilePath != NULL) {
+        gConsoleFileStream.open(consoleFilePath);
+    }
+}
+
+static void consoleFileReset()
+{
+    if (gConsoleFileStream.is_open()) {
+        gConsoleFilePrintCount = 0;
+        gConsoleFileStream.flush();
+    }
+}
+
+static void consoleFileExit()
+{
+    if (gConsoleFileStream.is_open()) {
+        gConsoleFileStream.close();
+    }
+}
+
+static void consoleFileAddMessage(const char* message)
+{
+    if (gConsoleFileStream.is_open()) {
+        gConsoleFileStream << message << '\n';
+
+        gConsoleFilePrintCount++;
+        if (gConsoleFilePrintCount >= 20) {
+            consoleFileFlush();
+        }
+    }
+}
+
+static void consoleFileFlush()
+{
+    if (gConsoleFileStream.is_open()) {
+        gConsoleFilePrintCount = 0;
+        gConsoleFileStream.flush();
+    }
+}
+
+} // namespace fallout

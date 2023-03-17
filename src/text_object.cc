@@ -1,16 +1,19 @@
 #include "text_object.h"
 
-#include "core.h"
+#include <string.h>
+
 #include "debug.h"
 #include "draw.h"
-#include "game_config.h"
+#include "input.h"
 #include "memory.h"
 #include "object.h"
+#include "settings.h"
+#include "svga.h"
 #include "text_font.h"
 #include "tile.h"
 #include "word_wrap.h"
 
-#include <string.h>
+namespace fallout {
 
 // The maximum number of text objects that can exist at the same time.
 #define TEXT_OBJECTS_MAX_COUNT (20)
@@ -79,18 +82,8 @@ int textObjectsInit(unsigned char* windowBuffer, int width, int height)
 
     tickersAdd(textObjectsTicker);
 
-    double textBaseDelay;
-    if (!configGetDouble(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_TEXT_BASE_DELAY_KEY, &textBaseDelay)) {
-        textBaseDelay = 3.5;
-    }
-
-    double textLineDelay;
-    if (!configGetDouble(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_TEXT_LINE_DELAY_KEY, &textLineDelay)) {
-        textLineDelay = 1.399993896484375;
-    }
-
-    gTextObjectsBaseDelay = (unsigned int)(textBaseDelay * 1000.0);
-    gTextObjectsLineDelay = (unsigned int)(textLineDelay * 1000.0);
+    gTextObjectsBaseDelay = (unsigned int)(settings.preferences.text_base_delay * 1000.0);
+    gTextObjectsLineDelay = (unsigned int)(settings.preferences.text_line_delay * 1000.0);
 
     gTextObjectsEnabled = true;
     gTextObjectsInitialized = true;
@@ -160,7 +153,7 @@ void textObjectsSetLineDelay(double value)
 
 // text_object_create
 // 0x4B036C
-int textObjectAdd(Object* object, char* string, int font, int color, int a5, Rect* rect)
+int textObjectAdd(Object* object, char* string, int font, int color, int outlineColor, Rect* rect)
 {
     if (!gTextObjectsInitialized) {
         return -1;
@@ -213,18 +206,15 @@ int textObjectAdd(Object* object, char* string, int font, int color, int a5, Rec
         char c = *ending;
         *ending = '\0';
 
-        // NOTE: Calls [fontGetStringWidth] twice, probably result of using min/max macro
-        int width = fontGetStringWidth(beginning);
-        if (width >= textObject->width) {
-            textObject->width = width;
-        }
+        // NOTE: Calls `fontGetStringWidth` twice.
+        textObject->width = std::max(textObject->width, fontGetStringWidth(beginning));
 
         *ending = c;
     }
 
     textObject->height = (fontGetLineHeight() + 1) * textObject->linesCount;
 
-    if (a5 != -1) {
+    if (outlineColor != -1) {
         textObject->width += 2;
         textObject->height += 2;
     }
@@ -241,7 +231,7 @@ int textObjectAdd(Object* object, char* string, int font, int color, int a5, Rec
     unsigned char* dest = textObject->data;
     int skip = textObject->width * (fontGetLineHeight() + 1);
 
-    if (a5 != -1) {
+    if (outlineColor != -1) {
         dest += textObject->width;
     }
 
@@ -263,8 +253,8 @@ int textObjectAdd(Object* object, char* string, int font, int color, int a5, Rec
         dest += skip;
     }
 
-    if (a5 != -1) {
-        bufferOutline(textObject->data, textObject->width, textObject->height, textObject->width, a5);
+    if (outlineColor != -1) {
+        bufferOutline(textObject->data, textObject->width, textObject->height, textObject->width, outlineColor);
     }
 
     if (object != NULL) {
@@ -475,3 +465,5 @@ void textObjectsRemoveByOwner(Object* object)
         }
     }
 }
+
+} // namespace fallout

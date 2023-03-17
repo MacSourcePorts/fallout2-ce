@@ -5,8 +5,12 @@
 
 #include <vector>
 
+namespace fallout {
+
 // The maximum number of opcodes.
-#define OPCODE_MAX_COUNT (342)
+//
+// SFALL: Increase number of opcodes.
+#define OPCODE_MAX_COUNT 768
 
 typedef enum Opcode {
     OPCODE_NOOP = 0x8000,
@@ -100,7 +104,9 @@ typedef enum ProgramFlags {
     PROGRAM_FLAG_0x02 = 0x02,
     PROGRAM_FLAG_0x04 = 0x04,
     PROGRAM_FLAG_STOPPED = 0x08,
-    PROGRAM_FLAG_0x10 = 0x10,
+
+    // Program is in waiting state with `checkWaitFunc` set.
+    PROGRAM_IS_WAITING = 0x10,
     PROGRAM_FLAG_0x20 = 0x20,
     PROGRAM_FLAG_0x40 = 0x40,
     PROGRAM_FLAG_CRITICAL_SECTION = 0x80,
@@ -147,6 +153,9 @@ typedef struct ProgramValue {
 
 typedef std::vector<ProgramValue> ProgramStack;
 
+typedef struct Program Program;
+typedef int(InterpretCheckWaitFunc)(Program* program);
+
 // It's size in original code is 144 (0x8C) bytes due to the different
 // size of `jmp_buf`.
 typedef struct Program {
@@ -162,17 +171,18 @@ typedef struct Program {
     unsigned char* identifiers;
     unsigned char* procedures;
     jmp_buf env;
-    int field_70; // end time of timer (field_74 + wait time)
-    int field_74; // time when wait was called
+    unsigned int waitEnd; // end time of timer (field_74 + wait time)
+    unsigned int waitStart; // time when wait was called
     int field_78; // time when program begin execution (for the first time)?, -1 - program never executed
-    int (*field_7C)(struct Program* s); // proc to check timer
+    InterpretCheckWaitFunc* checkWaitFunc;
     int flags; // flags
-    int field_84;
+    int windowId;
     bool exited;
     ProgramStack* stackValues;
     ProgramStack* returnStackValues;
 } Program;
 
+typedef unsigned int(InterpretTimerFunc)();
 typedef void OpcodeHandler(Program* program);
 
 extern int _TimeOut;
@@ -181,7 +191,7 @@ char* _interpretMangleName(char* s);
 void _interpretOutputFunc(int (*func)(char*));
 int _interpretOutput(const char* format, ...);
 [[noreturn]] void programFatalError(const char* str, ...);
-void programPopString(Program* program, opcode_t a2, int a3);
+void _interpretDecStringRef(Program* program, opcode_t a2, int a3);
 Program* programCreateByPath(const char* path);
 char* programGetString(Program* program, opcode_t opcode, int offset);
 char* programGetIdentifier(Program* program, int offset);
@@ -189,10 +199,12 @@ int programPushString(Program* program, char* string);
 void interpreterRegisterOpcodeHandlers();
 void _interpretClose();
 void _interpret(Program* program, int a2);
-void _executeProc(Program* program, int procedure_index);
+void _executeProc(Program* program, int procedureIndex);
 int programFindProcedure(Program* prg, const char* name);
-void _executeProcedure(Program* program, int procedure_index);
+void _executeProcedure(Program* program, int procedureIndex);
 void programListNodeCreate(Program* program);
+void runProgram(Program* program);
+Program* runScript(char* name);
 void _updatePrograms();
 void programListFree();
 void interpreterRegisterOpcode(int opcode, OpcodeHandler* handler);
@@ -216,5 +228,7 @@ void programReturnStackPushPointer(Program* program, void* value);
 ProgramValue programReturnStackPopValue(Program* program);
 int programReturnStackPopInteger(Program* program);
 void* programReturnStackPopPointer(Program* program);
+
+} // namespace fallout
 
 #endif /* INTERPRETER_H */

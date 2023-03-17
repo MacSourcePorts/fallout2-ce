@@ -1,5 +1,9 @@
 #include "skill.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "actions.h"
 #include "color.h"
 #include "combat.h"
@@ -7,7 +11,6 @@
 #include "debug.h"
 #include "display_monitor.h"
 #include "game.h"
-#include "game_config.h"
 #include "interface.h"
 #include "item.h"
 #include "message.h"
@@ -20,12 +23,11 @@
 #include "proto.h"
 #include "random.h"
 #include "scripts.h"
+#include "settings.h"
 #include "stat.h"
 #include "trait.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+namespace fallout {
 
 #define SKILLS_MAX_USES_PER_DAY (3)
 
@@ -48,6 +50,7 @@ typedef struct SkillDescription {
 
 static void _show_skill_use_messages(Object* obj, int skill, Object* a3, int a4, int a5);
 static int skillGetFreeUsageSlot(int skill);
+static int skill_use_slot_clear();
 
 // Damage flags which can be repaired using "Repair" skill.
 //
@@ -123,7 +126,7 @@ int skillsInit()
     }
 
     char path[COMPAT_MAX_PATH];
-    sprintf(path, "%s%s", asc_5186C8, "skill.msg");
+    snprintf(path, sizeof(path), "%s%s", asc_5186C8, "skill.msg");
 
     if (!messageListLoad(&gSkillsMessageList, path)) {
         return -1;
@@ -152,7 +155,10 @@ int skillsInit()
         gTaggedSkills[index] = -1;
     }
 
-    memset(_timesSkillUsed, 0, sizeof(_timesSkillUsed));
+    // NOTE: Uninline.
+    skill_use_slot_clear();
+
+    messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_SKILL, &gSkillsMessageList);
 
     return 0;
 }
@@ -164,12 +170,14 @@ void skillsReset()
         gTaggedSkills[index] = -1;
     }
 
-    memset(_timesSkillUsed, 0, sizeof(_timesSkillUsed));
+    // NOTE: Uninline.
+    skill_use_slot_clear();
 }
 
 // 0x4AA478
 void skillsExit()
 {
+    messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_SKILL, nullptr);
     messageListFree(&gSkillsMessageList);
 }
 
@@ -527,7 +535,7 @@ static void _show_skill_use_messages(Object* obj, int skill, Object* a3, int a4,
             int after = pcGetStat(PC_STAT_EXPERIENCE);
 
             char text[60];
-            sprintf(text, messageListItem.text, after - before);
+            snprintf(text, sizeof(text), messageListItem.text, after - before);
             displayMonitorAddMessage(text);
         }
     }
@@ -613,7 +621,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                         hpToHeal = maximumHp - currentHp;
                     }
 
-                    sprintf(text, messageListItem.text, hpToHeal);
+                    snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
                     displayMonitorAddMessage(text);
                 }
 
@@ -633,7 +641,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                     return -1;
                 }
 
-                sprintf(text, messageListItem.text, hpToHeal);
+                snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
                 displayMonitorAddMessage(text);
             }
 
@@ -651,7 +659,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                 if (a2 == gDude) {
                     strcpy(text, messageListItem.text);
                 } else {
-                    sprintf(text, messageListItem.text, objectGetName(a2));
+                    snprintf(text, sizeof(text), messageListItem.text, objectGetName(a2));
                 }
 
                 displayMonitorAddMessage(text);
@@ -707,7 +715,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                         // 533: crippled right leg
                         // 534: crippled left leg
                         messageListItem.num = 530 + index;
-                        if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
+                        if (!messageListGetItem(&gSkillsMessageList, &messageListItem)) {
                             return -1;
                         }
 
@@ -735,7 +743,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                             return -1;
                         }
 
-                        sprintf(text, prefix.text, messageListItem.text);
+                        snprintf(text, sizeof(text), prefix.text, messageListItem.text);
                         displayMonitorAddMessage(text);
                         _show_skill_use_messages(obj, skill, a2, v1, criticalChanceModifier);
 
@@ -766,7 +774,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                     if (maximumHp - currentHp < hpToHeal) {
                         hpToHeal = maximumHp - currentHp;
                     }
-                    sprintf(text, messageListItem.text, hpToHeal);
+                    snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
                     displayMonitorAddMessage(text);
                 }
 
@@ -793,7 +801,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                     return -1;
                 }
 
-                sprintf(text, messageListItem.text, hpToHeal);
+                snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
                 displayMonitorAddMessage(text);
 
                 scriptsExecMapUpdateProc();
@@ -811,7 +819,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                 if (a2 == gDude) {
                     strcpy(text, messageListItem.text);
                 } else {
-                    sprintf(text, messageListItem.text, objectGetName(a2));
+                    snprintf(text, sizeof(text), messageListItem.text, objectGetName(a2));
                 }
 
                 displayMonitorAddMessage(text);
@@ -920,7 +928,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                         return -1;
                     }
 
-                    sprintf(text, prefix.text, messageListItem.text);
+                    snprintf(text, sizeof(text), prefix.text, messageListItem.text);
                     displayMonitorAddMessage(text);
 
                     _show_skill_use_messages(obj, skill, a2, v1, criticalChanceModifier);
@@ -945,7 +953,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                     if (maximumHp - currentHp < hpToHeal) {
                         hpToHeal = maximumHp - currentHp;
                     }
-                    sprintf(text, messageListItem.text, hpToHeal);
+                    snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
                     displayMonitorAddMessage(text);
                 }
 
@@ -972,7 +980,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                     return -1;
                 }
 
-                sprintf(text, messageListItem.text, hpToHeal);
+                snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
                 displayMonitorAddMessage(text);
 
                 scriptsExecMapUpdateProc();
@@ -987,7 +995,7 @@ int skillUse(Object* obj, Object* a2, int skill, int criticalChanceModifier)
                     return -1;
                 }
 
-                sprintf(text, messageListItem.text, objectGetName(a2));
+                snprintf(text, sizeof(text), messageListItem.text, objectGetName(a2));
                 displayMonitorAddMessage(text);
 
                 giveExp = false;
@@ -1032,7 +1040,7 @@ int skillsPerformStealing(Object* a1, Object* a2, Object* item, bool isPlanting)
         // -4% per item size
         stealModifier -= 4 * itemGetSize(item);
 
-        if (((a2->fid & 0xF000000) >> 24) == OBJ_TYPE_CRITTER) {
+        if (FID_TYPE(a2->fid) == OBJ_TYPE_CRITTER) {
             // check facing: -25% if face to face
             if (_is_hit_from_front(a1, a2)) {
                 stealModifier -= 25;
@@ -1064,7 +1072,7 @@ int skillsPerformStealing(Object* a1, Object* a2, Object* item, bool isPlanting)
         catchRoll = ROLL_SUCCESS;
     } else {
         int catchChance;
-        if ((a2->pid >> 24) == OBJ_TYPE_CRITTER) {
+        if (PID_TYPE(a2->pid) == OBJ_TYPE_CRITTER) {
             catchChance = skillGetValue(a2, SKILL_STEAL) - stealModifier;
         } else {
             catchChance = 30 - stealModifier;
@@ -1084,7 +1092,7 @@ int skillsPerformStealing(Object* a1, Object* a2, Object* item, bool isPlanting)
             return -1;
         }
 
-        sprintf(text, messageListItem.text, objectGetName(item));
+        snprintf(text, sizeof(text), messageListItem.text, objectGetName(item));
         displayMonitorAddMessage(text);
 
         return 1;
@@ -1096,7 +1104,7 @@ int skillsPerformStealing(Object* a1, Object* a2, Object* item, bool isPlanting)
             return -1;
         }
 
-        sprintf(text, messageListItem.text, objectGetName(item));
+        snprintf(text, sizeof(text), messageListItem.text, objectGetName(item));
         displayMonitorAddMessage(text);
 
         return 0;
@@ -1120,8 +1128,7 @@ int skillGetGameDifficultyModifier(int skill)
     case SKILL_GAMBLING:
     case SKILL_OUTDOORSMAN:
         if (1) {
-            int gameDifficulty = GAME_DIFFICULTY_NORMAL;
-            configGetInt(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_GAME_DIFFICULTY_KEY, &gameDifficulty);
+            int gameDifficulty = settings.preferences.game_difficulty;
 
             if (gameDifficulty == GAME_DIFFICULTY_HARD) {
                 return -10;
@@ -1145,7 +1152,7 @@ static int skillGetFreeUsageSlot(int skill)
     }
 
     int time = gameTimeGetTime();
-    int hoursSinceLastUsage = (time - _timesSkillUsed[skill][SKILLS_MAX_USES_PER_DAY - 1]) / 36000;
+    int hoursSinceLastUsage = (time - _timesSkillUsed[skill][0]) / GAME_TIME_TICKS_PER_HOUR;
     if (hoursSinceLastUsage <= 24) {
         return -1;
     }
@@ -1162,13 +1169,22 @@ int skillUpdateLastUse(int skill)
     }
 
     if (_timesSkillUsed[skill][slot] != 0) {
-        for (int i = 0; i < slot - 1; i++) {
+        for (int i = 0; i < slot; i++) {
             _timesSkillUsed[skill][i] = _timesSkillUsed[skill][i + 1];
         }
     }
 
     _timesSkillUsed[skill][slot] = gameTimeGetTime();
 
+    return 0;
+}
+
+// NOTE: Inlined.
+//
+// 0x4ABF24
+int skill_use_slot_clear()
+{
+    memset(_timesSkillUsed, 0, sizeof(_timesSkillUsed));
     return 0;
 }
 
@@ -1204,3 +1220,5 @@ char* skillsGetGenericResponse(Object* critter, bool isDude)
     char* msg = getmsg(&gSkillsMessageList, &messageListItem, baseMessageId + messageId);
     return msg;
 }
+
+} // namespace fallout

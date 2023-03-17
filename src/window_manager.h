@@ -1,15 +1,11 @@
 #ifndef WINDOW_MANAGER_H
 #define WINDOW_MANAGER_H
 
-#include "geometry.h"
-
 #include <stddef.h>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#endif
+#include "geometry.h"
+
+namespace fallout {
 
 // The maximum number of buttons in one radio group.
 #define RADIO_GROUP_BUTTON_LIST_CAPACITY (64)
@@ -36,15 +32,19 @@ typedef enum WindowManagerErr {
 } WindowManagerErr;
 
 typedef enum WindowFlags {
-    WINDOW_FLAG_0x01 = 0x01,
-    WINDOW_FLAG_0x02 = 0x02,
-    WINDOW_FLAG_0x04 = 0x04,
-    WINDOW_HIDDEN = 0x08,
-    WINDOW_FLAG_0x10 = 0x10,
-    WINDOW_FLAG_0x20 = 0x20,
+    // Use system window flags which are set during game startup and does not
+    // change afterwards.
+    WINDOW_USE_DEFAULTS = 0x1,
+    WINDOW_DONT_MOVE_TOP = 0x2,
+    WINDOW_MOVE_ON_TOP = 0x4,
+    WINDOW_HIDDEN = 0x8,
+    // Sfall calls this Exclusive.
+    WINDOW_MODAL = 0x10,
+    WINDOW_TRANSPARENT = 0x20,
     WINDOW_FLAG_0x40 = 0x40,
+    // Draggable?
     WINDOW_FLAG_0x80 = 0x80,
-    WINDOW_FLAG_0x0100 = 0x0100,
+    WINDOW_MANAGED = 0x100,
 } WindowFlags;
 
 typedef enum ButtonFlags {
@@ -61,26 +61,23 @@ typedef enum ButtonFlags {
     BUTTON_FLAG_RIGHT_MOUSE_BUTTON_CONFIGURED = 0x080000,
 } ButtonFlags;
 
-typedef struct struc_176 {
-    int field_0;
-    int field_4;
-    int field_8;
-    int field_C;
-    int field_10;
-    int field_14;
-    int field_18;
+typedef struct MenuPulldown {
+    Rect rect;
+    int keyCode;
+    int itemsLength;
+    char** items;
     int field_1C;
     int field_20;
-} struc_176;
+} MenuPulldown;
 
-typedef struct struc_177 {
+typedef struct MenuBar {
     int win;
     Rect rect;
-    int entriesCount;
-    struc_176 entries[15];
-    int field_234;
-    int field_238;
-} struc_177;
+    int pulldownsLength;
+    MenuPulldown pulldowns[15];
+    int borderColor;
+    int backgroundColor;
+} MenuBar;
 
 typedef void WindowBlitProc(unsigned char* src, int width, int height, int srcPitch, unsigned char* dest, int destPitch);
 
@@ -93,16 +90,14 @@ typedef struct Window {
     Rect rect;
     int width;
     int height;
-    int field_20;
-    // rand
-    int field_24;
-    // rand
-    int field_28;
+    int color;
+    int tx;
+    int ty;
     unsigned char* buffer;
     Button* buttonListHead;
-    Button* field_34;
-    Button* field_38;
-    struc_177* field_3C;
+    Button* hoveredButton;
+    Button* clickedButton;
+    MenuBar* menuBar;
     WindowBlitProc* blitProc;
 } Window;
 
@@ -118,12 +113,12 @@ typedef struct Button {
     int leftMouseUpEventCode;
     int rightMouseDownEventCode;
     int rightMouseUpEventCode;
-    unsigned char* mouseUpImage;
-    unsigned char* mouseDownImage;
-    unsigned char* mouseHoverImage;
-    unsigned char* field_3C;
-    unsigned char* field_40;
-    unsigned char* field_44;
+    unsigned char* normalImage;
+    unsigned char* pressedImage;
+    unsigned char* hoverImage;
+    unsigned char* disabledNormalImage;
+    unsigned char* disabledPressedImage;
+    unsigned char* disabledHoverImage;
     unsigned char* currentImage;
     unsigned char* mask;
     ButtonCallback* mouseEnterProc;
@@ -151,20 +146,23 @@ typedef int(VideoSystemInitProc)();
 typedef void(VideoSystemExitProc)();
 
 extern bool gWindowSystemInitialized;
+extern int _GNW_wcolor[6];
 
 int windowManagerInit(VideoSystemInitProc* videoSystemInitProc, VideoSystemExitProc* videoSystemExitProc, int a3);
 void windowManagerExit(void);
-int windowCreate(int x, int y, int width, int height, int a4, int flags);
+int windowCreate(int x, int y, int width, int height, int color, int flags);
 void windowDestroy(int win);
 void windowDrawBorder(int win);
-void windowDrawText(int win, char* str, int a3, int x, int y, int a6);
+void windowDrawText(int win, const char* str, int a3, int x, int y, int a6);
+void _win_text(int win, char** fileNameList, int fileNameListLength, int maxWidth, int x, int y, int flags);
 void windowDrawLine(int win, int left, int top, int right, int bottom, int color);
 void windowDrawRect(int win, int left, int top, int right, int bottom, int color);
 void windowFill(int win, int x, int y, int width, int height, int a6);
-void windowUnhide(int win);
+void windowShow(int win);
 void windowHide(int win);
 void windowRefresh(int win);
 void windowRefreshRect(int win, const Rect* rect);
+void _GNW_win_refresh(Window* window, Rect* rect, unsigned char* a3);
 void windowRefreshAll(Rect* rect);
 void _win_get_mouse_buf(unsigned char* a1);
 Window* windowGetWindow(int win);
@@ -178,18 +176,23 @@ int _GNW_check_menu_bars(int a1);
 void programWindowSetTitle(const char* title);
 bool showMesageBox(const char* str);
 int buttonCreate(int win, int x, int y, int width, int height, int mouseEnterEventCode, int mouseExitEventCode, int mouseDownEventCode, int mouseUpEventCode, unsigned char* up, unsigned char* dn, unsigned char* hover, int flags);
+int _win_register_text_button(int win, int x, int y, int mouseEnterEventCode, int mouseExitEventCode, int mouseDownEventCode, int mouseUpEventCode, const char* title, int flags);
 int _win_register_button_disable(int btn, unsigned char* up, unsigned char* down, unsigned char* hover);
+int _win_register_button_image(int btn, unsigned char* up, unsigned char* down, unsigned char* hover, int a5);
 int buttonSetMouseCallbacks(int btn, ButtonCallback* mouseEnterProc, ButtonCallback* mouseExitProc, ButtonCallback* mouseDownProc, ButtonCallback* mouseUpProc);
 int buttonSetRightMouseCallbacks(int btn, int rightMouseDownEventCode, int rightMouseUpEventCode, ButtonCallback* rightMouseDownProc, ButtonCallback* rightMouseUpProc);
 int buttonSetCallbacks(int btn, ButtonCallback* onPressed, ButtonCallback* onUnpressed);
 int buttonSetMask(int btn, unsigned char* mask);
 bool _win_button_down(int btn);
 int buttonGetWindowId(int btn);
+int _win_last_button_winID();
 int buttonDestroy(int btn);
 int buttonEnable(int btn);
 int buttonDisable(int btn);
 int _win_set_button_rest_state(int btn, bool a2, int a3);
 int _win_group_radio_buttons(int a1, int* a2);
 int _win_button_press_and_release(int btn);
+
+} // namespace fallout
 
 #endif /* WINDOW_MANAGER_H */

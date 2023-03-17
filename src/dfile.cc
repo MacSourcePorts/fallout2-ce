@@ -1,13 +1,17 @@
 #include "dfile.h"
 
-#include "platform_compat.h"
-
-#include <fpattern.h>
-
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <algorithm>
+
+#include <fpattern.h>
+
+#include "platform_compat.h"
+
+namespace fallout {
 
 // The size of decompression buffer for reading compressed [DFile]s.
 #define DFILE_DECOMPRESSION_BUFFER_SIZE (0x400)
@@ -61,7 +65,7 @@ DBase* dbaseOpen(const char* filePath)
 
     // Get file size, and reposition stream to read footer, which contains two
     // 32-bits ints.
-    int fileSize = compat_filelength(fileno(stream));
+    int fileSize = getFileSize(stream);
     if (fseek(stream, fileSize - sizeof(int) * 2, SEEK_SET) != 0) {
         goto err;
     }
@@ -141,7 +145,7 @@ DBase* dbaseOpen(const char* filePath)
         goto err;
     }
 
-    dbase->path = strdup(filePath);
+    dbase->path = compat_strdup(filePath);
     dbase->dataOffset = fileSize - dbaseDataSize;
 
     fclose(stream);
@@ -816,10 +820,7 @@ static bool dfileReadCompressed(DFile* stream, void* ptr, size_t size)
 
         if (stream->decompressionStream->avail_in == 0) {
             // No more unprocessed data, request next chunk.
-            size_t bytesToRead = stream->entry->dataSize - stream->compressedBytesRead;
-            if (bytesToRead > DFILE_DECOMPRESSION_BUFFER_SIZE) {
-                bytesToRead = DFILE_DECOMPRESSION_BUFFER_SIZE;
-            }
+            size_t bytesToRead = std::min(DFILE_DECOMPRESSION_BUFFER_SIZE, stream->entry->dataSize - stream->compressedBytesRead);
 
             if (fread(stream->decompressionBuffer, bytesToRead, 1, stream->stream) != 1) {
                 break;
@@ -852,3 +853,5 @@ static void dfileUngetCompressed(DFile* stream, int ch)
     stream->flags |= DFILE_HAS_COMPRESSED_UNGETC;
     stream->position--;
 }
+
+} // namespace fallout

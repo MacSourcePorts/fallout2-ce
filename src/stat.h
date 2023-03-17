@@ -6,6 +6,8 @@
 #include "proto_types.h"
 #include "stat_defs.h"
 
+namespace fallout {
+
 #define STAT_ERR_INVALID_STAT (-5)
 
 int statsInit();
@@ -35,8 +37,8 @@ char* pcStatGetName(int pcStat);
 char* pcStatGetDescription(int pcStat);
 int statGetFrmId(int stat);
 int statRoll(Object* critter, int stat, int modifier, int* howMuch);
-int pcAddExperience(int xp);
-int pcAddExperienceWithOptions(int xp, bool a2);
+int pcAddExperience(int xp, int* xpGained = NULL);
+int pcAddExperienceWithOptions(int xp, bool a2, int* xpGained = NULL);
 int pcSetExperience(int a1);
 
 static inline bool statIsValid(int stat)
@@ -48,5 +50,7 @@ static inline bool pcStatIsValid(int pcStat)
 {
     return pcStat >= 0 && pcStat < PC_STAT_COUNT;
 }
+
+} // namespace fallout
 
 #endif /* STAT_H */

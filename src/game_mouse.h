@@ -3,6 +3,8 @@
 
 #include "obj_types.h"
 
+namespace fallout {
+
 typedef enum GameMouseMode {
     GAME_MOUSE_MODE_MOVE,
     GAME_MOUSE_MODE_ARROW,
@@ -78,6 +80,7 @@ void _gmouse_enable();
 void _gmouse_disable(int a1);
 void _gmouse_enable_scrolling();
 void _gmouse_disable_scrolling();
+bool gmouse_scrolling_is_enabled();
 int _gmouse_is_scrolling();
 void gameMouseRefresh();
 void _gmouse_handle_event(int mouseX, int mouseY, int mouseState);
@@ -97,5 +100,9 @@ int gameMouseRenderActionMenuItems(int x, int y, const int* menuItems, int menuI
 int gameMouseHighlightActionMenuItemAtIndex(int menuItemIndex);
 void gameMouseLoadItemHighlight();
 void _gmouse_remove_item_outline(Object* object);
+
+void gameMouseRefreshImmediately();
+
+} // namespace fallout
 
 #endif /* GAME_MOUSE_H */

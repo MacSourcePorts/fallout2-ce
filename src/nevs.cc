@@ -1,12 +1,14 @@
 #include "nevs.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 #include "debug.h"
 #include "interpreter_lib.h"
 #include "memory_manager.h"
 #include "platform_compat.h"
 
-#include <stdlib.h>
-#include <string.h>
+namespace fallout {
 
 #define NEVS_COUNT 40
 
@@ -89,7 +91,7 @@ static void _nevs_removeprogramreferences(Program* program)
 // 0x488418
 void _nevs_initonce()
 {
-    _interpretRegisterProgramDeleteCallback(_nevs_removeprogramreferences);
+    intLibRegisterProgramDeleteCallback(_nevs_removeprogramreferences);
 
     if (gNevs == NULL) {
         gNevs = (Nevs*)internal_calloc_safe(sizeof(Nevs), NEVS_COUNT, __FILE__, __LINE__); // "..\\int\\NEVS.C", 131
@@ -220,3 +222,5 @@ void _nevs_update()
         }
     }
 }
+
+} // namespace fallout

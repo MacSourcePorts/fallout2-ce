@@ -6,6 +6,8 @@
 #include "memory_defs.h"
 #include "memory_manager.h"
 
+namespace fallout {
+
 static void* gameMemoryMalloc(size_t size);
 static void* gameMemoryRealloc(void* ptr, size_t newSize);
 static void gameMemoryFree(void* ptr);
@@ -14,7 +16,6 @@ static void gameMemoryFree(void* ptr);
 int gameMemoryInit()
 {
     dictionarySetMemoryProcs(internal_malloc, internal_realloc, internal_free);
-    _db_register_mem(internal_malloc, internal_strdup, internal_free);
     memoryManagerSetProcs(gameMemoryMalloc, gameMemoryRealloc, gameMemoryFree);
 
     return 0;
@@ -37,3 +38,5 @@ static void gameMemoryFree(void* ptr)
 {
     internal_free(ptr);
 }
+
+} // namespace fallout

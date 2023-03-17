@@ -1,15 +1,15 @@
 #ifndef FILE_FIND_H
 #define FILE_FIND_H
 
-#include "platform_compat.h"
-
 #if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <windows.h>
 #else
 #include <dirent.h>
 #endif
+
+#include "platform_compat.h"
+
+namespace fallout {
 
 // NOTE: This structure is significantly different from what was in the
 // original code. Watcom provides opendir/readdir/closedir implementations,
@@ -64,5 +64,7 @@ static inline char* fileFindGetName(DirectoryFileFindData* findData)
     return findData->entry->d_name;
 #endif
 }
+
+} // namespace fallout
 
 #endif /* FILE_FIND_H */

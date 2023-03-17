@@ -1,8 +1,13 @@
 #include "endgame.h"
 
+#include <ctype.h>
+#include <limits.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
 #include "art.h"
 #include "color.h"
-#include "core.h"
 #include "credits.h"
 #include "cycle.h"
 #include "db.h"
@@ -10,28 +15,27 @@
 #include "debug.h"
 #include "draw.h"
 #include "game.h"
-#include "game_config.h"
 #include "game_mouse.h"
 #include "game_movie.h"
 #include "game_sound.h"
+#include "input.h"
 #include "map.h"
 #include "memory.h"
+#include "mouse.h"
 #include "object.h"
 #include "palette.h"
 #include "pipboy.h"
 #include "platform_compat.h"
 #include "random.h"
+#include "settings.h"
 #include "stat.h"
+#include "svga.h"
 #include "text_font.h"
 #include "window_manager.h"
 #include "word_wrap.h"
-#include "world_map.h"
+#include "worldmap.h"
 
-#include <ctype.h>
-#include <limits.h>
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
+namespace fallout {
 
 // The maximum number of subtitle lines per slide.
 #define ENDGAME_ENDING_MAX_SUBTITLES (50)
@@ -79,9 +83,7 @@ static void _endgame_movie_bk_process();
 static int endgameEndingInit();
 static void endgameEndingFree();
 static int endgameDeathEndingValidate(int* percentage);
-
-// 0x50B00C
-char _aEnglish_2[] = ENGLISH;
+static void endgameEndingUpdateOverlay();
 
 // The number of lines in current subtitles file.
 //
@@ -203,6 +205,8 @@ static unsigned char* gEndgameEndingSlideshowWindowBuffer;
 // 0x570BF4
 static int gEndgameEndingSlideshowWindow;
 
+static int gEndgameEndingOverlay;
+
 // 0x43F788
 void endgamePlaySlideshow()
 {
@@ -217,7 +221,7 @@ void endgamePlaySlideshow()
             if (ending->art_num == 327) {
                 endgameEndingRenderPanningScene(ending->direction, ending->voiceOverBaseName);
             } else {
-                int fid = buildFid(6, ending->art_num, 0, 0, 0);
+                int fid = buildFid(OBJ_TYPE_INTERFACE, ending->art_num, 0, 0, 0);
                 endgameEndingRenderStaticScene(fid, ending->voiceOverBaseName);
             }
         }
@@ -236,7 +240,7 @@ void endgamePlayMovie()
     tickersAdd(_endgame_movie_bk_process);
     backgroundSoundSetEndCallback(_endgame_movie_callback);
     backgroundSoundLoad("akiss", 12, 14, 15);
-    coreDelayProcessingEvents(3000);
+    inputPauseForTocks(3000);
 
     // NOTE: Result is ignored. I guess there was some kind of switch for male
     // vs. female ending, but it was not implemented.
@@ -309,7 +313,7 @@ static int endgameEndingHandleContinuePlaying()
 // 0x43FBDC
 static void endgameEndingRenderPanningScene(int direction, const char* narratorFileName)
 {
-    int fid = buildFid(6, 327, 0, 0, 0);
+    int fid = buildFid(OBJ_TYPE_INTERFACE, 327, 0, 0, 0);
 
     CacheEntry* backgroundHandle;
     Art* background = artLock(fid, &backgroundHandle);
@@ -319,6 +323,9 @@ static void endgameEndingRenderPanningScene(int direction, const char* narratorF
         unsigned char* backgroundData = artGetFrameData(background, 0, 0);
         bufferFill(gEndgameEndingSlideshowWindowBuffer, ENDGAME_ENDING_WINDOW_WIDTH, ENDGAME_ENDING_WINDOW_HEIGHT, ENDGAME_ENDING_WINDOW_WIDTH, _colorTable[0]);
         endgameEndingLoadPalette(6, 327);
+
+        // CE: Update overlay.
+        endgameEndingUpdateOverlay();
 
         unsigned char palette[768];
         memcpy(palette, _cmap, 768);
@@ -355,6 +362,8 @@ static void endgameEndingRenderPanningScene(int direction, const char* narratorF
 
         unsigned int since = 0;
         while (start != end) {
+            sharedFpsLimiter.mark();
+
             int v12 = 640 - v32;
 
             // TODO: Complex math, setup scene in debugger.
@@ -367,7 +376,7 @@ static void endgameEndingRenderPanningScene(int direction, const char* narratorF
 
                 windowRefresh(gEndgameEndingSlideshowWindow);
 
-                since = _get_time();
+                since = getTicks();
 
                 bool v14;
                 double v31;
@@ -407,11 +416,14 @@ static void endgameEndingRenderPanningScene(int direction, const char* narratorF
 
             soundContinueAll();
 
-            if (_get_input() != -1) {
+            if (inputGetInput() != -1) {
                 // NOTE: Uninline.
                 endgameEndingVoiceOverFree();
                 break;
             }
+
+            renderPresent();
+            sharedFpsLimiter.throttle();
         }
 
         tickersEnable();
@@ -423,7 +435,12 @@ static void endgameEndingRenderPanningScene(int direction, const char* narratorF
     }
 
     while (mouseGetEvent() != 0) {
-        _get_input();
+        sharedFpsLimiter.mark();
+
+        inputGetInput();
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
     }
 }
 
@@ -441,7 +458,10 @@ static void endgameEndingRenderStaticScene(int fid, const char* narratorFileName
         blitBufferToBuffer(backgroundData, ENDGAME_ENDING_WINDOW_WIDTH, ENDGAME_ENDING_WINDOW_HEIGHT, ENDGAME_ENDING_WINDOW_WIDTH, gEndgameEndingSlideshowWindowBuffer, ENDGAME_ENDING_WINDOW_WIDTH);
         windowRefresh(gEndgameEndingSlideshowWindow);
 
-        endgameEndingLoadPalette((fid & 0xF000000) >> 24, fid & 0xFFF);
+        endgameEndingLoadPalette(FID_TYPE(fid), fid & 0xFFF);
+
+        // CE: Update overlay.
+        endgameEndingUpdateOverlay();
 
         endgameEndingVoiceOverInit(narratorFileName);
 
@@ -454,17 +474,19 @@ static void endgameEndingRenderStaticScene(int fid, const char* narratorFileName
 
         paletteFadeTo(_cmap);
 
-        coreDelayProcessingEvents(500);
+        inputPauseForTocks(500);
 
         // NOTE: Uninline.
         endgameEndingVoiceOverReset();
 
-        unsigned int referenceTime = _get_time();
+        unsigned int referenceTime = getTicks();
         tickersDisable();
 
         int keyCode;
         while (true) {
-            keyCode = _get_input();
+            sharedFpsLimiter.mark();
+
+            keyCode = inputGetInput();
             if (keyCode != -1) {
                 break;
             }
@@ -485,6 +507,9 @@ static void endgameEndingRenderStaticScene(int fid, const char* narratorFileName
             endgameEndingRefreshSubtitles();
             windowRefresh(gEndgameEndingSlideshowWindow);
             soundContinueAll();
+
+            renderPresent();
+            sharedFpsLimiter.throttle();
         }
 
         tickersEnable();
@@ -495,13 +520,18 @@ static void endgameEndingRenderStaticScene(int fid, const char* narratorFileName
         gEndgameEndingVoiceOverSubtitlesLoaded = false;
 
         if (keyCode == -1) {
-            coreDelayProcessingEvents(500);
+            inputPauseForTocks(500);
         }
 
         paletteFadeTo(gPaletteBlack);
 
         while (mouseGetEvent() != 0) {
-            _get_input();
+            sharedFpsLimiter.mark();
+
+            inputGetInput();
+
+            renderPresent();
+            sharedFpsLimiter.throttle();
         }
     }
 
@@ -534,6 +564,13 @@ static int endgameEndingSlideshowWindowInit()
 
     paletteFadeTo(gPaletteBlack);
 
+    // CE: Every slide has a separate color palette which is incompatible with
+    // main color palette. Setup overlay to hide everything.
+    gEndgameEndingOverlay = windowCreate(0, 0, screenGetWidth(), screenGetHeight(), _colorTable[0], WINDOW_MOVE_ON_TOP);
+    if (gEndgameEndingOverlay == -1) {
+        return -1;
+    }
+
     int windowEndgameEndingX = (screenGetWidth() - ENDGAME_ENDING_WINDOW_WIDTH) / 2;
     int windowEndgameEndingY = (screenGetHeight() - ENDGAME_ENDING_WINDOW_HEIGHT) / 2;
     gEndgameEndingSlideshowWindow = windowCreate(windowEndgameEndingX,
@@ -541,7 +578,7 @@ static int endgameEndingSlideshowWindowInit()
         ENDGAME_ENDING_WINDOW_WIDTH,
         ENDGAME_ENDING_WINDOW_HEIGHT,
         _colorTable[0],
-        WINDOW_FLAG_0x04);
+        WINDOW_MOVE_ON_TOP);
     if (gEndgameEndingSlideshowWindow == -1) {
         return -1;
     }
@@ -555,19 +592,12 @@ static int endgameEndingSlideshowWindowInit()
 
     speechSetEndCallback(_endgame_voiceover_callback);
 
-    gEndgameEndingSubtitlesEnabled = false;
-    configGetBool(&gGameConfig, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_SUBTITLES_KEY, &gEndgameEndingSubtitlesEnabled);
+    gEndgameEndingSubtitlesEnabled = settings.preferences.subtitles;
     if (!gEndgameEndingSubtitlesEnabled) {
         return 0;
     }
 
-    char* language;
-    if (!configGetString(&gGameConfig, GAME_CONFIG_SYSTEM_KEY, GAME_CONFIG_LANGUAGE_KEY, &language)) {
-        gEndgameEndingSubtitlesEnabled = false;
-        return 0;
-    }
-
-    sprintf(gEndgameEndingSubtitlesLocalizedPath, "text\\%s\\cuts\\", language);
+    snprintf(gEndgameEndingSubtitlesLocalizedPath, sizeof(gEndgameEndingSubtitlesLocalizedPath), "text\\%s\\cuts\\", settings.system.language.c_str());
 
     gEndgameEndingSubtitles = (char**)internal_malloc(sizeof(*gEndgameEndingSubtitles) * ENDGAME_ENDING_MAX_SUBTITLES);
     if (gEndgameEndingSubtitles == NULL) {
@@ -609,6 +639,7 @@ static void endgameEndingSlideshowWindowFree()
 
     speechSetEndCallback(NULL);
     windowDestroy(gEndgameEndingSlideshowWindow);
+    windowDestroy(gEndgameEndingOverlay);
 
     if (!_endgame_mouse_state) {
         mouseHideCursor();
@@ -638,7 +669,7 @@ static void endgameEndingVoiceOverInit(const char* fileBaseName)
     gEndgameEndingVoiceOverSubtitlesLoaded = false;
 
     // Build speech file path.
-    sprintf(path, "%s%s", "narrator\\", fileBaseName);
+    snprintf(path, sizeof(path), "%s%s", "narrator\\", fileBaseName);
 
     if (speechLoad(path, 10, 14, 15) != -1) {
         gEndgameEndingVoiceOverSpeechLoaded = true;
@@ -646,7 +677,7 @@ static void endgameEndingVoiceOverInit(const char* fileBaseName)
 
     if (gEndgameEndingSubtitlesEnabled) {
         // Build subtitles file path.
-        sprintf(path, "%s%s.txt", gEndgameEndingSubtitlesLocalizedPath, fileBaseName);
+        snprintf(path, sizeof(path), "%s%s.txt", gEndgameEndingSubtitlesLocalizedPath, fileBaseName);
 
         if (endgameEndingSubtitlesLoad(path) != 0) {
             return;
@@ -661,7 +692,7 @@ static void endgameEndingVoiceOverInit(const char* fileBaseName)
 
         unsigned int timing = 0;
         for (int index = 0; index < gEndgameEndingSubtitlesLength; index++) {
-            double charactersCount = strlen(gEndgameEndingSubtitles[index]);
+            double charactersCount = static_cast<double>(strlen(gEndgameEndingSubtitles[index]));
             // NOTE: There is floating point math at 0x4402E6 used to add
             // timing.
             timing += (unsigned int)trunc(charactersCount * durationPerCharacter * 1000.0);
@@ -685,7 +716,7 @@ static void endgameEndingVoiceOverReset()
     }
 
     if (gEndgameEndingVoiceOverSubtitlesLoaded) {
-        gEndgameEndingSubtitlesReferenceTime = _get_time();
+        gEndgameEndingSubtitlesReferenceTime = getTicks();
     }
 }
 
@@ -716,7 +747,7 @@ static void endgameEndingLoadPalette(int type, int id)
 
     if (strlen(fileName) <= 8) {
         char path[COMPAT_MAX_PATH];
-        sprintf(path, "%s\\%s.pal", "art\\intrface", fileName);
+        snprintf(path, sizeof(path), "%s\\%s.pal", "art\\intrface", fileName);
         colorPaletteLoad(path);
     }
 }
@@ -746,27 +777,19 @@ static int endgameEndingSubtitlesLoad(const char* filePath)
         char* pch;
 
         // Find and clamp string at EOL.
-        pch = string;
-        while (*pch != '\0' && *pch != '\n') {
-            pch++;
-        }
-
-        if (*pch != '\0') {
+        pch = strchr(string, '\n');
+        if (pch != NULL) {
             *pch = '\0';
         }
 
         // Find separator. The value before separator is ignored (as opposed to
         // movie subtitles, where the value before separator is a timing).
-        pch = string;
-        while (*pch != '\0' && *pch != ':') {
-            pch++;
-        }
-
-        if (*pch != '\0') {
+        pch = strchr(string, ':');
+        if (pch != NULL) {
             if (gEndgameEndingSubtitlesLength < ENDGAME_ENDING_MAX_SUBTITLES) {
                 gEndgameEndingSubtitles[gEndgameEndingSubtitlesLength] = internal_strdup(pch + 1);
                 gEndgameEndingSubtitlesLength++;
-                gEndgameEndingSubtitlesCharactersCount += strlen(pch + 1);
+                gEndgameEndingSubtitlesCharactersCount += static_cast<int>(strlen(pch + 1));
             }
         }
     }
@@ -869,7 +892,7 @@ static int endgameEndingInit()
     const char* delim = " \t,";
     EndgameEnding entry;
     EndgameEnding* entries;
-    int narrator_file_len;
+    size_t narratorFileNameLength;
 
     if (gEndgameEndings != NULL) {
         internal_free(gEndgameEndings);
@@ -921,9 +944,9 @@ static int endgameEndingInit()
 
         strcpy(entry.voiceOverBaseName, tok);
 
-        narrator_file_len = strlen(entry.voiceOverBaseName);
-        if (isspace(entry.voiceOverBaseName[narrator_file_len - 1])) {
-            entry.voiceOverBaseName[narrator_file_len - 1] = '\0';
+        narratorFileNameLength = strlen(entry.voiceOverBaseName);
+        if (isspace(entry.voiceOverBaseName[narratorFileNameLength - 1])) {
+            entry.voiceOverBaseName[narratorFileNameLength - 1] = '\0';
         }
 
         tok = strtok(NULL, delim);
@@ -979,7 +1002,7 @@ int endgameDeathEndingInit()
     char* tok;
     EndgameDeathEnding entry;
     EndgameDeathEnding* entries;
-    int narrator_file_len;
+    size_t narratorFileNameLength;
 
     strcpy(gEndgameDeathEndingFileName, "narrator\\nar_5");
 
@@ -1046,13 +1069,13 @@ int endgameDeathEndingInit()
         }
 
         // this code is slightly different from the original, but does the same thing
-        narrator_file_len = strlen(tok);
-        strncpy(entry.voiceOverBaseName, tok, narrator_file_len);
+        narratorFileNameLength = strlen(tok);
+        strncpy(entry.voiceOverBaseName, tok, narratorFileNameLength);
 
         entry.enabled = false;
 
-        if (isspace(entry.voiceOverBaseName[narrator_file_len - 1])) {
-            entry.voiceOverBaseName[narrator_file_len - 1] = '\0';
+        if (isspace(entry.voiceOverBaseName[narratorFileNameLength - 1])) {
+            entry.voiceOverBaseName[narratorFileNameLength - 1] = '\0';
         }
 
         entries = (EndgameDeathEnding*)internal_realloc(gEndgameDeathEndings, sizeof(*entries) * (gEndgameDeathEndingsLength + 1));
@@ -1166,13 +1189,13 @@ static int endgameDeathEndingValidate(int* percentage)
         }
 
         if (deathEnding->worldAreaKnown != -1) {
-            if (!_wmAreaIsKnown(deathEnding->worldAreaKnown)) {
+            if (!wmAreaIsKnown(deathEnding->worldAreaKnown)) {
                 continue;
             }
         }
 
         if (deathEnding->worldAreaNotKnown != -1) {
-            if (_wmAreaIsKnown(deathEnding->worldAreaNotKnown)) {
+            if (wmAreaIsKnown(deathEnding->worldAreaNotKnown)) {
                 continue;
             }
         }
@@ -1205,3 +1228,15 @@ char* endgameDeathEndingGetFileName()
 
     return gEndgameDeathEndingFileName;
 }
+
+void endgameEndingUpdateOverlay()
+{
+    bufferFill(windowGetBuffer(gEndgameEndingOverlay),
+        windowGetWidth(gEndgameEndingOverlay),
+        windowGetHeight(gEndgameEndingOverlay),
+        windowGetWidth(gEndgameEndingOverlay),
+        intensityColorTable[_colorTable[0]][0]);
+    windowRefresh(gEndgameEndingOverlay);
+}
+
+} // namespace fallout

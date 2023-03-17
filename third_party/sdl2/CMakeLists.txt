@@ -6,11 +6,15 @@ set(SDL_STATIC ON)
 # Fixes _ftol2_sse already defined
 set(SDL_LIBC ON)
 
+if (ANDROID)
+    set(SDL_STATIC_PIC ON)
+endif()
+
 include(FetchContent)
 
 FetchContent_Declare(sdl2
     GIT_REPOSITORY "https://github.com/libsdl-org/SDL"
-    GIT_TAG "release-2.0.22"
+    GIT_TAG "release-2.26.1"
 )
 
 FetchContent_GetProperties(sdl2)
